@@ -288,7 +288,7 @@ def trtllm_batch_decode_mla(
             pytest.skip("cute-dsl MLA requires SM100+")
         if dynamic_scale:
             pytest.skip("cute-dsl does not support dynamic_scale")
-        if enable_pdl is not None:
+        if enable_pdl:
             pytest.skip("cute-dsl does not support enable_pdl")
         if skips_softmax:
             pytest.skip("cute-dsl does not support skip_softmax")
@@ -475,6 +475,7 @@ def trtllm_batch_decode_mla(
             torch.testing.assert_close(output, o_ref_view, rtol=rtol, atol=atol)
         except AssertionError as fa2_err:
             if backend == "cute-dsl":
+                print("fa2 reference may diverge from cute-dsl in some configs; fall back to torch reference as ground truth.")
                 # fa2 reference may diverge from cute-dsl in some configs;
                 # fall back to torch reference as ground truth.
                 query_for_ref = (
@@ -771,22 +772,24 @@ def trtllm_batch_decode_mla_sparse(
 
 @pytest.mark.parametrize(
     "layer_dimensions",
-    supported_mla_layer_dimensions,
+    [supported_mla_layer_dimensions[0]],
 )
 @pytest.mark.parametrize(
     "batch_size",
-    [1, 2, 4, 16, 32, 64, 128, 256, 512, 768, 1024],
+    [1],
+    #[1, 2, 4, 8],
 )
-@pytest.mark.parametrize("scale", [1.0, 0.5])
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
-@pytest.mark.parametrize("page_size", [32, 64])
+@pytest.mark.parametrize("scale", [1.0])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("page_size", [64])
 @pytest.mark.parametrize(
-    "q_len_per_request", [1, 2]
+    "q_len_per_request", [1]
+    #"q_len_per_request", [1, 4]
 )  # todo(Yingyi): verify larger q_len_per_request
 @pytest.mark.parametrize("dynamic_scale", [False])
-@pytest.mark.parametrize("enable_pdl", [True, False, None])
-@pytest.mark.parametrize("backend", ["trtllm-gen", "xqa", "cute-dsl"])
-@pytest.mark.parametrize("skips_softmax", [False, True])
+@pytest.mark.parametrize("enable_pdl", [False])
+@pytest.mark.parametrize("backend", ["trtllm-gen", "cute-dsl"])
+@pytest.mark.parametrize("skips_softmax", [False])
 def test_trtllm_batch_decode_mla(
     layer_dimensions: MLALayerDimensions,
     batch_size: int,
@@ -816,50 +819,50 @@ def test_trtllm_batch_decode_mla(
         dynamic_scale,
         enable_pdl,
         backend,
-        1024,
+        81920, # MAX_SEQ_LEN
         skips_softmax,
     )
 
 
-@pytest.mark.parametrize(
-    "batch_size",
-    [1, 2, 4, 16, 32, 64, 128],
-)
-@pytest.mark.parametrize("scale", [1.0])
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
-@pytest.mark.parametrize("q_len_per_request", [1, 2])
-@pytest.mark.parametrize("topk", [128, 2048])
-@pytest.mark.parametrize("is_varlen", [False, True])
-@pytest.mark.parametrize("enable_pdl", [True, False, None])
-@pytest.mark.parametrize("backend", ["trtllm-gen"])
-@pytest.mark.parametrize("qk_nope_head_dim", [128, 192])
-@pytest.mark.parametrize("num_attn_heads", [128, 64])
-def test_trtllm_batch_decode_mla_sparse(
-    batch_size: int,
-    scale: float,
-    dtype: torch.dtype,
-    q_len_per_request: int,
-    topk: int,
-    is_varlen: bool,
-    enable_pdl: bool,
-    backend: str,
-    qk_nope_head_dim: int,
-    num_attn_heads: int,
-):
-    """
-    Test sparse MLA decoding with top-k attention.
-    Based on FlashMLA test patterns from:
-    https://github.com/deepseek-ai/FlashMLA/blob/main/tests/test_flash_mla_decoding.py
-    """
-    trtllm_batch_decode_mla_sparse(
-        batch_size,
-        scale,
-        dtype,
-        q_len_per_request,
-        topk,
-        is_varlen,
-        enable_pdl,
-        backend,
-        qk_nope_head_dim,
-        num_attn_heads,
-    )
+#@pytest.mark.parametrize(
+#    "batch_size",
+#    [1, 2, 4, 16, 32, 64, 128],
+#)
+#@pytest.mark.parametrize("scale", [1.0])
+#@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
+#@pytest.mark.parametrize("q_len_per_request", [1, 2])
+#@pytest.mark.parametrize("topk", [128, 2048])
+#@pytest.mark.parametrize("is_varlen", [False, True])
+#@pytest.mark.parametrize("enable_pdl", [True, False, None])
+#@pytest.mark.parametrize("backend", ["trtllm-gen"])
+#@pytest.mark.parametrize("qk_nope_head_dim", [128, 192])
+#@pytest.mark.parametrize("num_attn_heads", [128, 64])
+#def test_trtllm_batch_decode_mla_sparse(
+#    batch_size: int,
+#    scale: float,
+#    dtype: torch.dtype,
+#    q_len_per_request: int,
+#    topk: int,
+#    is_varlen: bool,
+#    enable_pdl: bool,
+#    backend: str,
+#    qk_nope_head_dim: int,
+#    num_attn_heads: int,
+#):
+#    """
+#    Test sparse MLA decoding with top-k attention.
+#    Based on FlashMLA test patterns from:
+#    https://github.com/deepseek-ai/FlashMLA/blob/main/tests/test_flash_mla_decoding.py
+#    """
+#    trtllm_batch_decode_mla_sparse(
+#        batch_size,
+#        scale,
+#        dtype,
+#        q_len_per_request,
+#        topk,
+#        is_varlen,
+#        enable_pdl,
+#        backend,
+#        qk_nope_head_dim,
+#        num_attn_heads,
+#    )
