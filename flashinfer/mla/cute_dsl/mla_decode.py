@@ -77,7 +77,10 @@ def _check_can_implement(
         if is_fp8
         else BlackwellMultiHeadLatentAttentionForwardFP16
     )
-    cutlass_dtype = torch_to_cutlass_dtype(torch_dtype)
+    cutlass_in_dtype = torch_to_cutlass_dtype(torch_dtype)
+    # FP8 kernel writes BF16 output for better downstream precision.
+    # But the kernel also supports FP8 output.
+    cutlass_out_dtype = cutlass.BFloat16 if is_fp8 else cutlass_in_dtype
     if not KernelClass.can_implement(
         1,  # B (runtime, use placeholder)
         seq_len_q,
@@ -85,8 +88,8 @@ def _check_can_implement(
         num_heads,
         kv_lora_rank,
         qk_rope_head_dim,
-        cutlass_dtype,
-        cutlass_dtype,
+        cutlass_in_dtype,
+        cutlass_out_dtype,
         cutlass.Float32,
         cutlass.Float32,
         mma_qk_tiler_mn,
@@ -138,6 +141,7 @@ def _get_compiled_mla_kernel(
         else BlackwellMultiHeadLatentAttentionForwardFP16
     )
     cutlass_dtype = torch_to_cutlass_dtype(torch_dtype)
+    cutlass_out_dtype = cutlass.BFloat16 if is_fp8 else cutlass_dtype
 
     kernel_obj = KernelClass(
         acc_dtype=cutlass.Float32,
@@ -213,7 +217,7 @@ def _get_compiled_mla_kernel(
     )
     # o: [batch_size, seq_len_q, num_heads, latent_dim] — contiguous
     o_fake = cute.runtime.make_fake_compact_tensor(
-        cutlass_dtype,
+        cutlass_out_dtype,
         (sym_batch, sym_seq_q, sym_heads, sym_latent),
         stride_order=(3, 2, 1, 0),
         assumed_align=16,
@@ -399,7 +403,8 @@ def cute_dsl_mla_decode(
         workspace_bytes = workspace_buffer[:workspace_size]
     # Output buffer: contiguous [B, q_len, H, D].
     # Kernel reinterprets to [H, D, q_len, B] internally via zero-cost make_tensor.
-    out_dtype = q_dtype
+    # FP8 kernel writes BF16 output for better downstream precision.
+    out_dtype = torch.bfloat16 if q_dtype == torch.float8_e4m3fn else q_dtype
     if out is not None:
         o_k = out
     else:

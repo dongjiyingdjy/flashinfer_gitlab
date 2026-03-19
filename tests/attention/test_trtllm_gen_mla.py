@@ -288,7 +288,7 @@ def trtllm_batch_decode_mla(
             pytest.skip("cute-dsl MLA requires SM100+")
         if dynamic_scale:
             pytest.skip("cute-dsl does not support dynamic_scale")
-        if enable_pdl:
+        if enable_pdl is not None:
             pytest.skip("cute-dsl does not support enable_pdl")
         if skips_softmax:
             pytest.skip("cute-dsl does not support skip_softmax")
@@ -452,10 +452,6 @@ def trtllm_batch_decode_mla(
     kpe = kv_cache[..., layer_dimensions.head_dimensions.kv_lora_rank :]
 
     o_ref = wrapper.run(q_nope, q_pe, ckv, kpe, return_lse=False)
-
-    # cute-dsl fp8 kernel outputs fp8; cast to bf16 to match trtllm-gen / reference
-    if backend == "cute-dsl" and output.dtype == torch.float8_e4m3fn:
-        output = output.to(torch.bfloat16)
 
     if backend in ("trtllm-gen", "cute-dsl"):
         # check is nan
@@ -731,8 +727,8 @@ def trtllm_batch_decode_mla_sparse(
             torch.testing.assert_close(
                 output.float(),
                 out_ref.float(),
-                rtol=1e-1,
-                atol=1e-1,
+                rtol=1e-2,
+                atol=1e-2,
             )
         except AssertionError as e:
             # Calculate element-wise differences for debugging
@@ -783,11 +779,11 @@ def trtllm_batch_decode_mla_sparse(
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
 @pytest.mark.parametrize("page_size", [64])
 @pytest.mark.parametrize(
-    "q_len_per_request", [1]
+    "q_len_per_request", [4]
     #"q_len_per_request", [1, 4]
 )  # todo(Yingyi): verify larger q_len_per_request
 @pytest.mark.parametrize("dynamic_scale", [False])
-@pytest.mark.parametrize("enable_pdl", [False])
+@pytest.mark.parametrize("enable_pdl", [None])
 @pytest.mark.parametrize("backend", ["trtllm-gen", "cute-dsl"])
 @pytest.mark.parametrize("skips_softmax", [False])
 def test_trtllm_batch_decode_mla(
