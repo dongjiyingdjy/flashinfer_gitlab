@@ -952,6 +952,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :type SharedStorage: cutlass.Constexpr
         """
 
+        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+
         tidx, _, _ = cute.arch.thread_idx()
         bidx, _, _ = cute.arch.block_idx()
         mma_tile_coord_v = bidx % cute.size(tiled_mma_qk.thr_id.shape)
