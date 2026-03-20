@@ -271,6 +271,7 @@ def trtllm_batch_decode_mla(
     backend: str,
     MAX_SEQ_LEN: int,
     skips_softmax: bool,
+    is_var_seq: bool,
 ):
     compute_capability = get_compute_capability(torch.device(device="cuda"))
     if backend == "xqa":
@@ -394,6 +395,7 @@ def trtllm_batch_decode_mla(
         skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
         enable_pdl=enable_pdl,
         backend=backend,
+        is_var_seq=is_var_seq,
     )
     # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
     # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
@@ -786,6 +788,7 @@ def trtllm_batch_decode_mla_sparse(
 @pytest.mark.parametrize("enable_pdl", [None])
 @pytest.mark.parametrize("backend", ["trtllm-gen", "cute-dsl"])
 @pytest.mark.parametrize("skips_softmax", [False])
+@pytest.mark.parametrize("is_var_seq", [False])
 def test_trtllm_batch_decode_mla(
     layer_dimensions: MLALayerDimensions,
     batch_size: int,
@@ -797,6 +800,7 @@ def test_trtllm_batch_decode_mla(
     enable_pdl: bool,
     backend: str,
     skips_softmax: bool,
+    is_var_seq: bool,
 ):
     if backend == "xqa" and layer_dimensions.head_dimensions == smaller_mla_dimensions:
         pytest.skip("XQA MLA does not support smaller MLA dimensions yet.")
@@ -817,6 +821,7 @@ def test_trtllm_batch_decode_mla(
         backend,
         81920, # MAX_SEQ_LEN
         skips_softmax,
+        is_var_seq,
     )
 
 

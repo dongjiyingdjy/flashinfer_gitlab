@@ -75,15 +75,26 @@ from cutlass.cute.arch import Arch
 from cutlass.cutlass_dsl import BaseDSL
 
 
-from .mla_helpers import (
-    ceil_div,
-    MAX_SPLITS,
-    LOG2_E,
-    MLAStaticTileScheduler,
-    MLAStaticTileSchedulerParams,
-    create_mla_static_tile_scheduler,
-    create_mla_static_tile_scheduler_params,
-)
+try:
+    from .mla_helpers import (
+        ceil_div,
+        MAX_SPLITS,
+        LOG2_E,
+        MLAStaticTileScheduler,
+        MLAStaticTileSchedulerParams,
+        create_mla_static_tile_scheduler,
+        create_mla_static_tile_scheduler_params,
+    )
+except ImportError:
+    from mla_helpers import (
+        ceil_div,
+        MAX_SPLITS,
+        LOG2_E,
+        MLAStaticTileScheduler,
+        MLAStaticTileSchedulerParams,
+        create_mla_static_tile_scheduler,
+        create_mla_static_tile_scheduler_params,
+    )
 
 """
 A Multi-Head Latent Attention (MLA) example using fp8 as input/output for the NVIDIA Blackwell SM100 architecture using CUTE DSL
@@ -940,8 +951,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :param SharedStorage: Shared storage for the kernel
         :type SharedStorage: cutlass.Constexpr
         """
-
-        warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
 
         tidx, _, _ = cute.arch.thread_idx()
         bidx, _, _ = cute.arch.block_idx()
@@ -3489,7 +3498,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             return False
         if in_dtype not in [cutlass.Float8E4M3FN]:
             return False
-        if out_dtype not in [cutlass.BFloat16]:
+        if out_dtype not in [cutlass.Float8E4M3FN]:
             return False
         if acc_dtype != cutlass.Float32 or lse_dtype != cutlass.Float32:
             return False

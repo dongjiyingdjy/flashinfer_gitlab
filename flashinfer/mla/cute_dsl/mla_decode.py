@@ -77,10 +77,7 @@ def _check_can_implement(
         if is_fp8
         else BlackwellMultiHeadLatentAttentionForwardFP16
     )
-    cutlass_in_dtype = torch_to_cutlass_dtype(torch_dtype)
-    # FP8 kernel writes BF16 output for better downstream precision.
-    # But the kernel also supports FP8 output.
-    cutlass_out_dtype = cutlass.BFloat16 if is_fp8 else cutlass_in_dtype
+    cutlass_dtype = torch_to_cutlass_dtype(torch_dtype)
     if not KernelClass.can_implement(
         1,  # B (runtime, use placeholder)
         seq_len_q,
@@ -88,8 +85,8 @@ def _check_can_implement(
         num_heads,
         kv_lora_rank,
         qk_rope_head_dim,
-        cutlass_in_dtype,
-        cutlass_out_dtype,
+        cutlass_dtype,
+        cutlass_dtype,
         cutlass.Float32,
         cutlass.Float32,
         mma_qk_tiler_mn,
