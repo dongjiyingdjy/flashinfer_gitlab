@@ -119,7 +119,7 @@ def _get_compiled_mla_kernel(
     """Compile and cache an MLA decode kernel.
 
     Returns a callable that accepts (q_latent, q_rope, c_latent, c_rope,
-    page_table, o, lse, workspace, split_kv_scalar, cache_seqs,
+    page_table, o, lse (None to skip), workspace, split_kv_scalar, cache_seqs,
     block_split_kvs, softmax_scale_scalar, output_scale_scalar).
 
     All scalar arguments must be pre-wrapped as Int32/Float32.
@@ -219,13 +219,6 @@ def _get_compiled_mla_kernel(
         stride_order=(3, 2, 1, 0),
         assumed_align=16,
     )
-    # lse: [batch_size, seq_len_q, num_heads] — contiguous
-    lse_fake = cute.runtime.make_fake_compact_tensor(
-        cutlass.Float32,
-        (sym_batch, sym_seq_q, sym_heads),
-        stride_order=(2, 1, 0),
-        assumed_align=16,
-    )
     if is_workspace_size_zero:
         workspace_fake = None
     else:
@@ -262,7 +255,7 @@ def _get_compiled_mla_kernel(
         c_rope_fake,
         page_table_fake,
         o_fake,
-        lse_fake,
+        None,  # lse (disabled)
         workspace_fake,
         Int32(1),  # split_kv placeholder
         cache_seqs_fake,
@@ -409,9 +402,6 @@ def cute_dsl_mla_decode(
             (B, q_len, H, kv_lora_rank), dtype=out_dtype, device=query.device
         )
 
-    # LSE: contiguous [B, q_len, H]. Kernel reinterprets to [H, q_len, B].
-    lse_k = torch.empty((B, q_len, H), dtype=torch.float32, device=query.device)
-
     # cache_seqs: per-batch sequence lengths (skip .to() if already int32)
     cache_seqs = seq_lens if seq_lens.dtype == torch.int32 else seq_lens.to(torch.int32)
 
@@ -458,7 +448,7 @@ def cute_dsl_mla_decode(
         c_rope_k,
         page_table_k,
         o_k,
-        lse_k,
+        None,  # lse (disabled)
         workspace_bytes,
         Int32(split_kv),
         cache_seqs,

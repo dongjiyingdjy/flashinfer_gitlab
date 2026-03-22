@@ -786,7 +786,7 @@ def trtllm_batch_decode_mla_sparse(
 )  # todo(Yingyi): verify larger q_len_per_request
 @pytest.mark.parametrize("dynamic_scale", [False])
 @pytest.mark.parametrize("enable_pdl", [None])
-@pytest.mark.parametrize("backend", ["trtllm-gen", "cute-dsl"])
+@pytest.mark.parametrize("backend", ["cute-dsl", "trtllm-gen"])
 @pytest.mark.parametrize("skips_softmax", [False])
 @pytest.mark.parametrize("is_var_seq", [False])
 def test_trtllm_batch_decode_mla(
