@@ -3039,43 +3039,57 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         # mma_o pipeline consumer wait
         for iter_n in cutlass.range_constexpr(self.iterations_pv_n):
             common_params.mma_o_pipeline.consumer_wait(mma_o_consumer_state)
-            # tmem load tiled copy and partition results.
+            # tmem load tiled copy and partition results (full tile).
             tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc = (
                 self._tmem_load_partition(
                     common_params, common_params.tiled_mma_pv, iter_n
                 )
             )
 
-            # load o
+            # Full TMEM load to registers
             cute.copy(tmem_load_tiled_copy, tTR_tAcc, tTR_rAcc)
 
-            # apply output scale and normalize by row_sum
-            for i in cutlass.range(
-                cute.size(tTR_rAcc), vectorize=True, unroll_full=True
-            ):
-                tTR_rAcc[i] = (
-                    tTR_rAcc[i]
-                    * epilogue_params.output_scale
-                    * cute.arch.rcp_approx(row_sum)
-                )
+            # Subtiled elementwise + STG: elementwise of subtile N+1 overlaps
+            # with STG of subtile N via instruction-level parallelism.
+            # tTR_rAcc shape: ((V, 1), 1, rest_tiles) where rest_tiles = 4.
+            # Split along rest_tiles (mode 2) for subtiling.
+            num_epi_subtiles = tTR_rAcc.shape[2]
+            vec_size = cute.size(cute.select(tTR_rAcc.shape, mode=[0]))
 
-            # store o to global memory
+            # Prepare output fragment for type conversion
             tR2G_rO_src = None
             tR2G_rO_dst = tTR_gO
             if cutlass.const_expr(common_params.mAccO is None):
                 tR2G_rO_src = cute.make_fragment_like(tTR_gO, self.o_dtype)
-                # using final output dtype for o
-                tR2G_rO_src.store(tTR_rAcc.load().to(self.o_dtype))
             else:
-                # using accumulate dtype for o
                 tR2G_rO_src = tTR_rAcc
 
-            if cute.elem_less(tTR_cO[0][0], common_params.H):
-                cute.autovec_copy(
-                    tR2G_rO_src,
-                    tR2G_rO_dst,
-                    l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
-                )
+            for d_sub in cutlass.range_constexpr(num_epi_subtiles):
+                # Elementwise: scale and normalize
+                for i in cutlass.range(
+                    vec_size, vectorize=True, unroll_full=True
+                ):
+                    tTR_rAcc[i, 0, d_sub] = (
+                        tTR_rAcc[i, 0, d_sub]
+                        * epilogue_params.output_scale
+                        * cute.arch.rcp_approx(row_sum)
+                    )
+
+                # Type convert per subtile using vectorized load/to/store
+                # (scalar f32→fp8 cvt is not supported by hardware)
+                if cutlass.const_expr(common_params.mAccO is None):
+                    tR2G_rO_src[None, None, d_sub].store(
+                        tTR_rAcc[None, None, d_sub].load().to(self.o_dtype)
+                    )
+
+                # Store this subtile to global memory using autovec_copy
+                # for vectorized stores (STG.128).
+                if cute.elem_less(tTR_cO[0][0], common_params.H):
+                    cute.autovec_copy(
+                        tR2G_rO_src[None, None, d_sub],
+                        tR2G_rO_dst[None, None, d_sub],
+                        l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
+                    )
 
             # store the lse to global memory
             cta_pv_tiler = (
