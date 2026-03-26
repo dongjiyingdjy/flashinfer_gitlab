@@ -305,6 +305,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         self.p_mma_stage = 2
         self.p_cor_stage = 2
         self.mma_o_stage = 2
+        self.mma_o_per_n_stage = self.mma_o_stage // self.iterations_pv_n
 
         self.tmem_o_offset = self.mma_s_stage * self.mma_qk_tiler[1] // self.warps_in_n
         self.correction_factor_offset = (
@@ -1016,9 +1017,16 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         p_cor_pipeline = self.make_and_init_p_cor_pipeline(
             storage.p_cor_mbar_ptr.data_ptr()
         )
-        mma_o_pipeline = self.make_and_init_mma_o_pipeline(
-            storage.mma_o_mbar_ptr.data_ptr(), cta_layout_vmnk
-        )
+        mma_o_per_n_stage = self.mma_o_stage // self.iterations_pv_n
+        mma_o_pipelines = []
+        for j in cutlass.range_constexpr(self.iterations_pv_n):
+            mma_o_pipelines.append(
+                self.make_and_init_mma_o_pipeline(
+                    storage.mma_o_mbar_ptr.data_ptr() + j * mma_o_per_n_stage * 2,
+                    cta_layout_vmnk,
+                    num_stages=mma_o_per_n_stage,
+                )
+            )
 
         # Cluster arrive after barrier init
         pipeline_init_arrive(cluster_shape_mn=self.cluster_shape_mnk, is_relaxed=True)
@@ -1204,8 +1212,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             p_mma_consumer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, self.p_mma_stage
             )
-            mma_o_producer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Producer, self.mma_o_stage
+            mma_o_ps_0 = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.mma_o_per_n_stage
+            )
+            mma_o_ps_1 = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Producer, self.mma_o_per_n_stage
             )
             tile_sched = create_mla_static_tile_scheduler(
                 tile_sched_params, cute.arch.block_idx(), cute.arch.grid_dim()
@@ -1236,7 +1247,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     )
                     mma_pv_params = SimpleNamespace(
                         p_mma_pipeline=p_mma_pipeline,
-                        mma_o_pipeline=mma_o_pipeline,
+                        mma_o_pipelines=mma_o_pipelines,
                         sP=sP,
                         sVC=sVC,
                     )
@@ -1248,7 +1259,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         load_v_consumer_state,
                         mma_s_producer_state,
                         p_mma_consumer_state,
-                        mma_o_producer_state,
+                        mma_o_ps_0, mma_o_ps_1,
                     ) = self.mma(
                         mma_common_params,
                         mma_qk_params,
@@ -1261,13 +1272,14 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         load_v_consumer_state,
                         mma_s_producer_state,
                         p_mma_consumer_state,
-                        mma_o_producer_state,
+                        mma_o_ps_0, mma_o_ps_1,
                     )
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
 
             mma_s_pipeline.producer_tail(mma_s_producer_state)
-            mma_o_pipeline.producer_tail(mma_o_producer_state)
+            mma_o_pipelines[0].producer_tail(mma_o_ps_0)
+            mma_o_pipelines[1].producer_tail(mma_o_ps_1)
 
             tmem.relinquish_alloc_permit()
             tmem.free(tmem_ptr)
@@ -1289,8 +1301,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             p_cor_producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, self.p_cor_stage
             )
-            mma_o_consumer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Consumer, self.mma_o_stage
+            mma_o_cs_0 = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Consumer, self.mma_o_per_n_stage
+            )
+            mma_o_cs_1 = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Consumer, self.mma_o_per_n_stage
             )
             tmem.wait_for_alloc()
             tmem_ptr = tmem.retrieve_ptr(self.acc_dtype)
@@ -1314,9 +1329,12 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         mO=mO,
                         K=cache_seqs[blk_coord[2]],
                         L=mCL.shape[1],
+                        H=mQL.shape[0],
                         tmem_ptr=tmem_ptr,
                         tidx=tidx,
                         p_cor_pipeline=p_cor_pipeline,
+                        tiled_mma_pv=tiled_mma_pv,
+                        mma_o_pipelines=mma_o_pipelines,
                     )
                     compute_softmax_params = SimpleNamespace(
                         tiled_mma_qk=tiled_mma_qk,
@@ -1325,16 +1343,44 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         p_mma_pipeline=p_mma_pipeline,
                         softmax_scale_log2=softmax_scale_log2,
                     )
-                    mma_s_consumer_state, p_mma_producer_state, p_cor_producer_state = (
-                        self.compute(
-                            compute_common_params,
-                            compute_softmax_params,
-                            k_index=k_index,
-                            k_tile_count=k_tile_count,
-                            mma_s_consumer_state=mma_s_consumer_state,
-                            p_mma_producer_state=p_mma_producer_state,
-                            p_cor_producer_state=p_cor_producer_state,
-                        )
+                    compute_epilogue_params = SimpleNamespace(
+                        output_scale=output_scale,
+                        softmax_scale_log2=softmax_scale_log2,
+                        mAccLSE=mAccLSE,
+                        mLSE=mLSE,
+                    )
+                    (
+                        mma_s_consumer_state,
+                        p_mma_producer_state,
+                        p_cor_producer_state,
+                        row_sum,
+                        row_max,
+                    ) = self.compute(
+                        compute_common_params,
+                        compute_softmax_params,
+                        k_index=k_index,
+                        k_tile_count=k_tile_count,
+                        mma_s_consumer_state=mma_s_consumer_state,
+                        p_mma_producer_state=p_mma_producer_state,
+                        p_cor_producer_state=p_cor_producer_state,
+                    )
+
+                    # Epilogue stage 1 on softmax warp (parallel with correction warp's stage 0)
+                    # Advance mma_o_cs_1 to match the correction warp's consumption
+                    # (correction warp consumed k_tile_count - 1 items from pipeline[1] via rescale)
+                    advance_count = k_tile_count - 1
+                    while advance_count > 0:
+                        mma_o_cs_1.advance()
+                        advance_count = advance_count - 1
+                    mma_o_cs_1 = self._epilogue_single(
+                        compute_common_params,
+                        compute_epilogue_params,
+                        mma_o_cs_1,
+                        row_sum,
+                        row_max,
+                        1,
+                        self.softmax_exchange_sync_bar_pair02,
+                        self.softmax_exchange_sync_bar_pair13,
                     )
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
@@ -1351,8 +1397,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             p_cor_consumer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, self.p_cor_stage
             )
-            mma_o_consumer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Consumer, self.mma_o_stage
+            mma_o_cs_0 = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Consumer, self.mma_o_per_n_stage
+            )
+            mma_o_cs_1 = pipeline.make_pipeline_state(
+                pipeline.PipelineUserType.Consumer, self.mma_o_per_n_stage
             )
             # sync with mma warp before retrieving tmem ptr
             tmem.wait_for_alloc()
@@ -1383,7 +1432,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         tidx=tidx,
                         tiled_mma_pv=tiled_mma_pv,
                         p_cor_pipeline=p_cor_pipeline,
-                        mma_o_pipeline=mma_o_pipeline,
+                        mma_o_pipelines=mma_o_pipelines,
                     )
                     compute_epilogue_params = SimpleNamespace(
                         output_scale=output_scale,
@@ -1391,12 +1440,13 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         mAccLSE=mAccLSE,
                         mLSE=mLSE,
                     )
-                    p_cor_consumer_state, mma_o_consumer_state = self.correction(
+                    p_cor_consumer_state, mma_o_cs_0, mma_o_cs_1 = self.correction(
                         compute_common_params,
                         compute_epilogue_params,
                         k_tile_count=k_tile_count,
                         p_cor_consumer_state=p_cor_consumer_state,
-                        mma_o_consumer_state=mma_o_consumer_state,
+                        mma_o_cs_0=mma_o_cs_0,
+                        mma_o_cs_1=mma_o_cs_1,
                     )
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
@@ -1971,42 +2021,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         load_v_consumer_state: pipeline.PipelineState,
         mma_s_producer_state: pipeline.PipelineState,
         p_mma_consumer_state: pipeline.PipelineState,
-        mma_o_producer_state: pipeline.PipelineState,
-    ) -> tuple[
-        cute.TiledMma,
-        cute.TiledMma,
-        pipeline.PipelineState,
-        pipeline.PipelineState,
-        pipeline.PipelineState,
-        pipeline.PipelineState,
-        pipeline.PipelineState,
-    ]:
+        mma_o_ps_0: pipeline.PipelineState,
+        mma_o_ps_1: pipeline.PipelineState,
+    ):
         """MMA warp to compute the result of Q*K^T and P*V. Updates the tiled mma and pipeline states.
-
-        :param common_params: The common parameters for mma qk and pv
-        :type common_params: SimpleNamespace
-        :param qk_params: The mma qk parameters
-        :type qk_params: SimpleNamespace
-        :param pv_params: The mma pv parameters
-        :type pv_params: SimpleNamespace
-        :param k_tile_count: The k tile count
-        :type k_tile_count: cutlass.Int32
-        :param tiled_mma_qk: The tiled mma qk
-        :type tiled_mma_qk: cute.TiledMma
-        :param tiled_mma_pv: The tiled mma pv
-        :type tiled_mma_pv: cute.TiledMma
-        :param load_q_consumer_state: The load q consumer state
-        :type load_q_consumer_state: pipeline.PipelineState
-        :param load_k_consumer_state: The load k consumer state
-        :type load_k_consumer_state: pipeline.PipelineState
-        :param load_v_consumer_state: The load v consumer state
-        :type load_v_consumer_state: pipeline.PipelineState
-        :param mma_s_producer_state: The mma s producer state
-        :type mma_s_producer_state: pipeline.PipelineState
-        :param p_mma_consumer_state: The p mma consumer state
-        :type p_mma_consumer_state: pipeline.PipelineState
-        :param mma_o_producer_state: The mma o producer state
-        :type mma_o_producer_state: pipeline.PipelineState
 
         :return: The tiled mma qk, the tiled mma pv, the load q consumer state, the load k consumer state, the load v consumer state, the mma s producer state, the p mma consumer state, and the mma o producer state
         :rtype: tuple[cute.TiledMma, cute.TiledMma, pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState]
@@ -2093,14 +2111,14 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     tiled_mma_pv,
                     load_v_consumer_state,
                     p_mma_consumer_state,
-                    mma_o_producer_state,
+                    mma_o_ps_0, mma_o_ps_1,
                 ) = self.mma_pv(
                     common_params,
                     pv_params,
                     tiled_mma_pv,
                     load_v_consumer_state,
                     p_mma_consumer_state,
-                    mma_o_producer_state,
+                    mma_o_ps_0, mma_o_ps_1,
                 )
                 k_tile_count -= 1
             # release q consumer states
@@ -2110,14 +2128,14 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 tiled_mma_pv,
                 load_v_consumer_state,
                 p_mma_consumer_state,
-                mma_o_producer_state,
+                mma_o_ps_0, mma_o_ps_1,
             ) = self.mma_pv(
                 common_params,
                 pv_params,
                 tiled_mma_pv,
                 load_v_consumer_state,
                 p_mma_consumer_state,
-                mma_o_producer_state,
+                mma_o_ps_0, mma_o_ps_1,
             )
 
         return (  # type: ignore[return-value]
@@ -2128,7 +2146,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             load_v_consumer_state,
             mma_s_producer_state,
             p_mma_consumer_state,
-            mma_o_producer_state,
+            mma_o_ps_0, mma_o_ps_1,
         )
 
     @cute.jit
@@ -2219,63 +2237,50 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         tiled_mma_pv: cute.TiledMma,
         load_v_consumer_state: pipeline.PipelineState,
         p_mma_consumer_state: pipeline.PipelineState,
-        mma_o_producer_state: pipeline.PipelineState,
-    ) -> tuple[
-        cute.TiledMma,
-        pipeline.PipelineState,
-        pipeline.PipelineState,
-        pipeline.PipelineState,
-    ]:
-        """Compute one k-tile of mma for P*V. Updates the tiled mma pv and pipeline states.
-
-        :param common_params: The common parameters
-        :type common_params: SimpleNamespace
-        :param pv_params: The pv parameters
-        :type pv_params: SimpleNamespace
-        :param tiled_mma_pv: The tiled mma pv
-        :type tiled_mma_pv: cute.TiledMma
-        :param load_v_consumer_state: The load v consumer state
-        :type load_v_consumer_state: pipeline.PipelineState
-        :param p_mma_consumer_state: The P MMA consumer state
-        :type p_mma_consumer_state: pipeline.PipelineState
-        :param mma_o_producer_state: The MMA o producer state
-        :type mma_o_producer_state: pipeline.PipelineState
-
-        :return: The tiled mma pv, the load v consumer state, the P MMA consumer state, and the MMA o producer state
-        :rtype: tuple[cute.TiledMma, pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState]
-        """
+        mma_o_ps_0: pipeline.PipelineState,
+        mma_o_ps_1: pipeline.PipelineState,
+    ):
+        """Compute one k-tile of mma for P*V. Updates the tiled mma pv and pipeline states."""
 
         pv_params.p_mma_pipeline.consumer_wait(p_mma_consumer_state)
         load_v_pipeline = common_params.load_v_pipeline
         accumulate_flag = tiled_mma_pv.get(tcgen05.Field.ACCUMULATE)
-        mma_o_pipeline = pv_params.mma_o_pipeline
 
         load_v_pipeline.consumer_wait(load_v_consumer_state)
         vc_stage = load_v_consumer_state.index
-        for acc_stage in range(self.iterations_pv_n):
-            mma_o_pipeline.producer_acquire(mma_o_producer_state)
-            tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, accumulate_flag)
-            for p_stage in range(self.iterations_pv_k):
-                tOtO = pv_params.tOtO_staged[None, None, None, acc_stage]
-                for k_block in cutlass.range_constexpr(pv_params.tOrP.shape[2]):
-                    cute.gemm(
-                        tiled_mma_pv,
-                        tOtO,
-                        pv_params.tOrP[
-                            None,
-                            None,
-                            k_block,
-                            (p_stage, p_mma_consumer_state.index),
-                        ],
-                        pv_params.tOrVC[
-                            None, None, k_block, ((acc_stage, p_stage), vc_stage)
-                        ],
-                        tOtO,
-                    )
-                    tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, True)
 
-            mma_o_pipeline.producer_commit(mma_o_producer_state)
-            mma_o_producer_state.advance()
+        # acc_stage=0: use mma_o_pipelines[0] with compile-time constant index
+        pv_params.mma_o_pipelines[0].producer_acquire(mma_o_ps_0)
+        tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, accumulate_flag)
+        for p_stage in range(self.iterations_pv_k):
+            tOtO = pv_params.tOtO_staged[None, None, None, 0]
+            for k_block in cutlass.range_constexpr(pv_params.tOrP.shape[2]):
+                cute.gemm(
+                    tiled_mma_pv, tOtO,
+                    pv_params.tOrP[None, None, k_block, (p_stage, p_mma_consumer_state.index)],
+                    pv_params.tOrVC[None, None, k_block, ((0, p_stage), vc_stage)],
+                    tOtO,
+                )
+                tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, True)
+        pv_params.mma_o_pipelines[0].producer_commit(mma_o_ps_0)
+        mma_o_ps_0.advance()
+
+        # acc_stage=1: use mma_o_pipelines[1] with compile-time constant index
+        pv_params.mma_o_pipelines[1].producer_acquire(mma_o_ps_1)
+        tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, accumulate_flag)
+        for p_stage in range(self.iterations_pv_k):
+            tOtO = pv_params.tOtO_staged[None, None, None, 1]
+            for k_block in cutlass.range_constexpr(pv_params.tOrP.shape[2]):
+                cute.gemm(
+                    tiled_mma_pv, tOtO,
+                    pv_params.tOrP[None, None, k_block, (p_stage, p_mma_consumer_state.index)],
+                    pv_params.tOrVC[None, None, k_block, ((1, p_stage), vc_stage)],
+                    tOtO,
+                )
+                tiled_mma_pv.set(tcgen05.Field.ACCUMULATE, True)
+        pv_params.mma_o_pipelines[1].producer_commit(mma_o_ps_1)
+        mma_o_ps_1.advance()
+
         load_v_pipeline.consumer_release(load_v_consumer_state)
         load_v_consumer_state.advance()
         pv_params.p_mma_pipeline.consumer_release(p_mma_consumer_state)
@@ -2285,7 +2290,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             tiled_mma_pv,
             load_v_consumer_state,
             p_mma_consumer_state,
-            mma_o_producer_state,
+            mma_o_ps_0, mma_o_ps_1,
         )
 
     @cute.jit
@@ -2298,27 +2303,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         mma_s_consumer_state: pipeline.PipelineState,
         p_mma_producer_state: pipeline.PipelineState,
         p_cor_producer_state: pipeline.PipelineState,
-    ) -> tuple[pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState]:
-        """Compute warp to compute the result of softmax, rescale, and epilogue. Updates the related pipeline states.
-
-        :param common_params: The common parameters
-        :type common_params: SimpleNamespace
-        :param softmax_params: The softmax parameters
-        :type softmax_params: SimpleNamespace
-        :param k_index: The index of the k-tile
-        :type k_index: cutlass.Int32
-        :param k_tile_count: The number of k-tiles
-        :type k_tile_count: cutlass.Int32
-        :param mma_s_consumer_state: The MMA s consumer state
-        :type mma_s_consumer_state: pipeline.PipelineState
-        :param p_mma_producer_state: The P MMA producer state
-        :type p_mma_producer_state: pipeline.PipelineState
-        :param p_cor_producer_state: The P correction producer state
-        :type p_cor_producer_state: pipeline.PipelineState
-
-        :return: The MMA s consumer state, the P MMA producer state, and the P correction producer state
-        :rtype: tuple[pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState]
-        """
+    ) -> tuple[pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState, cutlass.Float32, cutlass.Float32]:
+        """Compute warp to compute the result of softmax. Returns pipeline states and row_sum/row_max for epilogue."""
 
         k_tile_total = cute.ceil_div(common_params.K, self.mma_qk_tiler[1])
 
@@ -2396,7 +2382,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 True,
             )
 
-        return mma_s_consumer_state, p_mma_producer_state, p_cor_producer_state
+        return mma_s_consumer_state, p_mma_producer_state, p_cor_producer_state, row_sum, row_max
 
     @cute.jit
     def correction(
@@ -2405,26 +2391,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         epilogue_params: SimpleNamespace,
         k_tile_count: cutlass.Int32,
         p_cor_consumer_state: pipeline.PipelineState,
-        mma_o_consumer_state: pipeline.PipelineState,
-    ) -> tuple[pipeline.PipelineState, pipeline.PipelineState]:
-        """Compute warp to compute the result of softmax, rescale, and epilogue. Updates the related pipeline states.
-
-        :param common_params: The common parameters
-        :type common_params: SimpleNamespace
-        :param epilogue_params: The epilogue parameters
-        :type epilogue_params: SimpleNamespace
-        :param k_index: The index of the k-tile
-        :type k_index: cutlass.Int32
-        :param k_tile_count: The number of k-tiles
-        :type k_tile_count: cutlass.Int32
-        :param p_cor_consumer_state: The P correction consumer state
-        :type p_cor_consumer_state: pipeline.PipelineState
-        :param mma_o_consumer_state: The MMA o consumer state
-        :type mma_o_consumer_state: pipeline.PipelineState
-
-        :return: The P correction consumer state, and the MMA o consumer state
-        :rtype: tuple[pipeline.PipelineState, pipeline.PipelineState]
-        """
+        mma_o_cs_0: pipeline.PipelineState,
+        mma_o_cs_1: pipeline.PipelineState,
+    ):
+        """Compute warp to compute the result of softmax, rescale, and epilogue."""
 
         k_tile_count_init = k_tile_count
         while k_tile_count > 0:
@@ -2432,22 +2402,27 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 self.get_correction_factor(common_params, p_cor_consumer_state)
             )
             if k_tile_count_init != k_tile_count:
-                mma_o_consumer_state = self.rescale(
+                mma_o_cs_0, mma_o_cs_1 = self.rescale(
                     common_params,
-                    mma_o_consumer_state,
+                    mma_o_cs_0, mma_o_cs_1,
                     correction_factor,
                     no_correction,
                 )
             k_tile_count = k_tile_count - 1
             if k_tile_count == 0:
-                mma_o_consumer_state = self.epilogue(
+                # Only epilogue stage 0 on correction warp;
+                # stage 1 is handled by the softmax warp in parallel
+                mma_o_cs_0 = self._epilogue_single(
                     common_params,
                     epilogue_params,
-                    mma_o_consumer_state,
+                    mma_o_cs_0,
                     row_sum,
                     row_max,
+                    0,
+                    self.epilogue_exchange_sync_bar_pair02,
+                    self.epilogue_exchange_sync_bar_pair13,
                 )
-        return p_cor_consumer_state, mma_o_consumer_state
+        return p_cor_consumer_state, mma_o_cs_0, mma_o_cs_1
 
     @cute.jit
     def exchange_p_cor_metadata(
@@ -2978,88 +2953,59 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
     def rescale(
         self,
         common_params: SimpleNamespace,
-        mma_o_consumer_state: pipeline.PipelineState,
+        mma_o_cs_0: pipeline.PipelineState,
+        mma_o_cs_1: pipeline.PipelineState,
         correction_factor: cutlass.Float32,
         no_correction: cutlass.Int32,
-    ) -> pipeline.PipelineState:
-        """Rescale for one k-tile. Updates the related pipeline state.
-
-        :param common_params: The common parameters
-        :type common_params: SimpleNamespace
-        :param mma_o_consumer_state: The mma o consumer state
-        :type mma_o_consumer_state: pipeline.PipelineState
-        :param correction_factor: The correction factor
-        :type correction_factor: cutlass.Float32
-        :param no_correction: Whether to apply correction factor
-        :type no_correction: cutlass.Int32
-
-        :return: The MMA o consumer state
-        :rtype: pipeline.PipelineState
-        """
+    ):
+        """Rescale for one k-tile."""
         skip_correction = cute.arch.vote_all_sync(no_correction == 1)
         for iter_n in cutlass.range_constexpr(self.iterations_pv_n):
-            common_params.mma_o_pipeline.consumer_wait(mma_o_consumer_state)
+            # Use compile-time constant index to access the correct pipeline
+            mma_o_cs = mma_o_cs_0 if iter_n == 0 else mma_o_cs_1
+            common_params.mma_o_pipelines[iter_n].consumer_wait(mma_o_cs)
             if not skip_correction:
-                # tmem load tiled copy and partition results.
                 tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc = (
                     self._tmem_load_partition(
                         common_params, common_params.tiled_mma_pv, iter_n
                     )
                 )
-
-                # tmem store tiled copy
                 tmem_store_atom = cute.make_copy_atom(
                     tcgen05.copy.St32x32bOp(tcgen05.copy.Repetition(32)), self.acc_dtype
                 )
                 tmem_store_tiled_copy = tcgen05.make_tmem_copy(tmem_store_atom, tAcc)
-
-                # load o
                 cute.copy(tmem_load_tiled_copy, tTR_tAcc, tTR_rAcc)
-                # rescale, using `mul_packed_f32x2` to reduce the number of instructions
                 for i in cutlass.range(
                     cute.size(tTR_rAcc), vectorize=True, unroll_full=True
                 ):
                     tTR_rAcc[i] = tTR_rAcc[i] * correction_factor
-
-                # store o to tensor memory for next k tile
                 cute.copy(tmem_store_tiled_copy, tTR_rAcc, tTR_tAcc)
 
             cute.arch.fence_view_async_tmem_store()
-            common_params.mma_o_pipeline.consumer_release(mma_o_consumer_state)
-            mma_o_consumer_state.advance()
+            common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
+            mma_o_cs.advance()
+            if cutlass.const_expr(iter_n == 0):
+                mma_o_cs_0 = mma_o_cs
+            else:
+                mma_o_cs_1 = mma_o_cs
 
-        return mma_o_consumer_state
+        return mma_o_cs_0, mma_o_cs_1
 
     @cute.jit
     def epilogue(
         self,
         common_params: SimpleNamespace,
         epilogue_params: SimpleNamespace,
-        mma_o_consumer_state: pipeline.PipelineState,
+        mma_o_cs_0: pipeline.PipelineState,
+        mma_o_cs_1: pipeline.PipelineState,
         row_sum: cutlass.Float32,
         row_max: cutlass.Float32,
-    ) -> pipeline.PipelineState:
-        """Epilogue for one k-tile. Updates the related pipeline state.
-
-        :param common_params: The common parameters
-        :type common_params: SimpleNamespace
-        :param epilogue_params: The epilogue parameters
-        :type epilogue_params: SimpleNamespace
-        :param mma_o_consumer_state: The mma o consumer state
-        :type mma_o_consumer_state: pipeline.PipelineState
-        :param row_sum: The row sum
-        :type row_sum: cutlass.Float32
-        :param row_max: The row max
-        :type row_max: cutlass.Float32
-
-        :return: The MMA o consumer state
-        :rtype: pipeline.PipelineState
-        """
+    ):
+        """Epilogue for one k-tile."""
 
         tidx = common_params.tidx % (self.num_compute_warps * self.threads_per_warp)
 
         # exchange row_sum between warps (0, 1) and (2, 3)
-        # Use split barriers so each pair only waits for its partner.
         if cutlass.const_expr(self.warps_in_n == 2):
             common_params.smem_exchange[tidx] = row_sum
             warp_in_group = tidx // self.threads_per_warp
@@ -3067,71 +3013,54 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 self.epilogue_exchange_sync_bar_pair02.wait()
             else:
                 self.epilogue_exchange_sync_bar_pair13.wait()
-            # (64, 2)
             row_sum = (
                 row_sum
                 + common_params.smem_exchange[
                     (tidx + 64) % (self.num_compute_warps * self.threads_per_warp)
                 ]
             )
-        # Pre-compute the output scale factor once to avoid redundant MUFU.RCP
-        # instructions inside the per-element loop (rcp_approx generates MUFU.RCP
-        # which has 8-cycle throughput; hoisting it saves up to ~500 cycles).
-        epi_scale = epilogue_params.output_scale * cute.arch.rcp_approx(row_sum)
 
         # mma_o pipeline consumer wait
         for iter_n in cutlass.range_constexpr(self.iterations_pv_n):
-            common_params.mma_o_pipeline.consumer_wait(mma_o_consumer_state)
-            # tmem load tiled copy and partition results (full tile).
+            mma_o_cs = mma_o_cs_0 if iter_n == 0 else mma_o_cs_1
+            common_params.mma_o_pipelines[iter_n].consumer_wait(mma_o_cs)
+            # tmem load tiled copy and partition results.
             tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc = (
                 self._tmem_load_partition(
                     common_params, common_params.tiled_mma_pv, iter_n
                 )
             )
 
-            # Full TMEM load to registers
+            # load o
             cute.copy(tmem_load_tiled_copy, tTR_tAcc, tTR_rAcc)
 
-            # Subtiled elementwise + STG: elementwise of subtile N+1 overlaps
-            # with STG of subtile N via instruction-level parallelism.
-            # tTR_rAcc shape: ((V, 1), 1, rest_tiles) where rest_tiles = 4.
-            # Split along rest_tiles (mode 2) for subtiling.
-            num_epi_subtiles = tTR_rAcc.shape[2]
-            vec_size = cute.size(cute.select(tTR_rAcc.shape, mode=[0]))
+            # apply output scale and normalize by row_sum
+            for i in cutlass.range(
+                cute.size(tTR_rAcc), vectorize=True, unroll_full=True
+            ):
+                tTR_rAcc[i] = (
+                    tTR_rAcc[i]
+                    * epilogue_params.output_scale
+                    * cute.arch.rcp_approx(row_sum)
+                )
 
-            # Prepare output fragment for type conversion
+            # store o to global memory
             tR2G_rO_src = None
             tR2G_rO_dst = tTR_gO
             if cutlass.const_expr(common_params.mAccO is None):
                 tR2G_rO_src = cute.make_fragment_like(tTR_gO, self.o_dtype)
+                # using final output dtype for o
+                tR2G_rO_src.store(tTR_rAcc.load().to(self.o_dtype))
             else:
+                # using accumulate dtype for o
                 tR2G_rO_src = tTR_rAcc
 
-            for d_sub in cutlass.range_constexpr(num_epi_subtiles):
-                # Elementwise: scale and normalize (using pre-computed epi_scale)
-                for i in cutlass.range(
-                    vec_size, vectorize=True, unroll_full=True
-                ):
-                    tTR_rAcc[i, 0, d_sub] = (
-                        tTR_rAcc[i, 0, d_sub]
-                        * epi_scale
-                    )
-
-                # Type convert per subtile using vectorized load/to/store
-                # (scalar f32→fp8 cvt is not supported by hardware)
-                if cutlass.const_expr(common_params.mAccO is None):
-                    tR2G_rO_src[None, None, d_sub].store(
-                        tTR_rAcc[None, None, d_sub].load().to(self.o_dtype)
-                    )
-
-                # Store this subtile to global memory using autovec_copy
-                # for vectorized stores (STG.128).
-                if cute.elem_less(tTR_cO[0][0], common_params.H):
-                    cute.autovec_copy(
-                        tR2G_rO_src[None, None, d_sub],
-                        tR2G_rO_dst[None, None, d_sub],
-                        l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
-                    )
+            if cute.elem_less(tTR_cO[0][0], common_params.H):
+                cute.autovec_copy(
+                    tR2G_rO_src,
+                    tR2G_rO_dst,
+                    l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
+                )
 
             # store the lse to global memory
             cta_pv_tiler = (
@@ -3204,10 +3133,160 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         gLSE[tidx] = lse
 
             cute.arch.fence_view_async_tmem_load()
-            common_params.mma_o_pipeline.consumer_release(mma_o_consumer_state)
-            mma_o_consumer_state.advance()
+            common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
+            mma_o_cs.advance()
+            if cutlass.const_expr(iter_n == 0):
+                mma_o_cs_0 = mma_o_cs
+            else:
+                mma_o_cs_1 = mma_o_cs
 
-        return mma_o_consumer_state
+        return mma_o_cs_0, mma_o_cs_1
+
+    @cute.jit
+    def _epilogue_single(
+        self,
+        common_params: SimpleNamespace,
+        epilogue_params: SimpleNamespace,
+        mma_o_cs: pipeline.PipelineState,
+        row_sum: cutlass.Float32,
+        row_max: cutlass.Float32,
+        iter_n: int,
+        exchange_bar_pair02: pipeline.NamedBarrier,
+        exchange_bar_pair13: pipeline.NamedBarrier,
+    ):
+        """Epilogue for a single acc_stage (iter_n). Uses the given exchange_bars for row_sum exchange."""
+
+        tidx = common_params.tidx % (self.num_compute_warps * self.threads_per_warp)
+
+        # exchange row_sum between warps (0, 1) and (2, 3)
+        if cutlass.const_expr(self.warps_in_n == 2):
+            common_params.smem_exchange[tidx] = row_sum
+            warp_in_group = tidx // self.threads_per_warp
+            if warp_in_group % 2 == 0:
+                exchange_bar_pair02.wait()
+            else:
+                exchange_bar_pair13.wait()
+            row_sum = (
+                row_sum
+                + common_params.smem_exchange[
+                    (tidx + 64) % (self.num_compute_warps * self.threads_per_warp)
+                ]
+            )
+
+        common_params.mma_o_pipelines[iter_n].consumer_wait(mma_o_cs)
+        # tmem load tiled copy and partition results.
+        tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc = (
+            self._tmem_load_partition(
+                common_params, common_params.tiled_mma_pv, iter_n
+            )
+        )
+
+        # load o
+        cute.copy(tmem_load_tiled_copy, tTR_tAcc, tTR_rAcc)
+
+        # apply output scale and normalize by row_sum
+        for i in cutlass.range(
+            cute.size(tTR_rAcc), vectorize=True, unroll_full=True
+        ):
+            tTR_rAcc[i] = (
+                tTR_rAcc[i]
+                * epilogue_params.output_scale
+                * cute.arch.rcp_approx(row_sum)
+            )
+
+        # store o to global memory
+        tR2G_rO_src = None
+        tR2G_rO_dst = tTR_gO
+        if cutlass.const_expr(common_params.mAccO is None):
+            tR2G_rO_src = cute.make_fragment_like(tTR_gO, self.o_dtype)
+            # using final output dtype for o
+            tR2G_rO_src.store(tTR_rAcc.load().to(self.o_dtype))
+        else:
+            # using accumulate dtype for o
+            tR2G_rO_src = tTR_rAcc
+
+        if cute.elem_less(tTR_cO[0][0], common_params.H):
+            cute.autovec_copy(
+                tR2G_rO_src,
+                tR2G_rO_dst,
+                l1c_evict_priority=cute.nvgpu.CacheEvictionPriority.NO_ALLOCATE,
+            )
+
+        # store the lse to global memory
+        cta_pv_tiler = (
+            self.mma_pv_tiler[0] // self.cluster_shape_mnk[0],
+            self.mma_pv_tiler[1],
+            self.mma_pv_tiler[2],
+        )
+        if cutlass.const_expr(epilogue_params.mAccLSE is None):
+            if cutlass.const_expr(not self.skip_lse):
+                lse = (
+                    cute.math.log2(row_sum, fastmath=True)
+                    + epilogue_params.softmax_scale_log2 * row_max
+                )
+                gLSE = cute.local_tile(
+                    epilogue_params.mLSE,
+                    (cta_pv_tiler[0], 1, 1),
+                    (
+                        common_params.blk_coord[0],
+                        common_params.blk_coord[1],
+                        common_params.blk_coord[2],
+                    ),
+                    (1, 1, 1),
+                )
+                cLSE = cute.local_tile(
+                    cute.make_identity_tensor(epilogue_params.mLSE.shape),
+                    (cta_pv_tiler[0], 1, 1),
+                    (
+                        common_params.blk_coord[0],
+                        common_params.blk_coord[1],
+                        common_params.blk_coord[2],
+                    ),
+                    (1, 1, 1),
+                )
+                if cutlass.const_expr(self.warps_in_n == 2):
+                    if cute.elem_less(cLSE[tidx][0], common_params.H):
+                        gLSE[tidx] = lse
+        else:
+            lse = (
+                cute.math.log2(row_sum, fastmath=True)
+                + epilogue_params.softmax_scale_log2 * row_max
+            )
+            gLSE = cute.local_tile(
+                epilogue_params.mAccLSE[
+                    None, common_params.blk_coord[3], None, None
+                ],
+                (cta_pv_tiler[0], 1, 1),
+                (
+                    common_params.blk_coord[0],
+                    common_params.blk_coord[1],
+                    common_params.blk_coord[2],
+                ),
+                (1, 1, 1),
+            )
+            cLSE = cute.local_tile(
+                cute.make_identity_tensor(
+                    epilogue_params.mAccLSE[
+                        None, common_params.blk_coord[3], None, None
+                    ].shape
+                ),
+                (cta_pv_tiler[0], 1, 1),
+                (
+                    common_params.blk_coord[0],
+                    common_params.blk_coord[1],
+                    common_params.blk_coord[2],
+                ),
+                (1, 1, 1),
+            )
+            if cutlass.const_expr(self.warps_in_n == 2):
+                if cute.elem_less(cLSE[tidx][0], common_params.H):
+                    gLSE[tidx] = lse
+
+        cute.arch.fence_view_async_tmem_load()
+        common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
+        mma_o_cs.advance()
+
+        return mma_o_cs
 
     def make_and_init_load_qkv_pipeline(
         self, load_qkv_mbar_ptr, cta_layout_vmnk, load_stages, tx_count
@@ -3342,7 +3421,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         )
 
     def make_and_init_mma_o_pipeline(
-        self, mma_o_mbar_ptr, cta_layout_vmnk
+        self, mma_o_mbar_ptr, cta_layout_vmnk, num_stages=None,
     ) -> pipeline.PipelineUmmaAsync:
         """Create and initialize the mma o pipeline.
 
@@ -3350,11 +3429,15 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :type mma_o_mbar_ptr: cute.Tensor
         :param cta_layout_vmnk: The cta layout vmnk
         :type cta_layout_vmnk: tuple[int, int, int]
+        :param num_stages: Override the number of stages (default: self.mma_o_stage)
+        :type num_stages: int, optional
 
         :return: The mma o pipeline
         :rtype: pipeline.PipelineUmmaAsync
         """
 
+        if num_stages is None:
+            num_stages = self.mma_o_stage
         mma_o_producer_group = pipeline.CooperativeGroup(
             pipeline.Agent.Thread, len([self.mma_warp_id])
         )
@@ -3369,7 +3452,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         )
         return pipeline.PipelineUmmaAsync.create(
             barrier_storage=mma_o_mbar_ptr,
-            num_stages=self.mma_o_stage,
+            num_stages=num_stages,
             producer_group=mma_o_producer_group,
             consumer_group=mma_o_consumer_group,
             cta_layout_vmnk=cta_layout_vmnk,
