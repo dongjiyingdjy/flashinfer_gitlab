@@ -273,11 +273,19 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 + self.threads_per_warp * self.num_compute_warps * 2
             ),
         )
-        self.softmax_exchange_sync_bar = pipeline.NamedBarrier(
-            barrier_id=2, num_threads=(self.threads_per_warp * self.num_compute_warps)
+        # Split exchange barriers: warp0↔warp2 and warp1↔warp3 are independent
+        # exchange pairs. Using separate barriers avoids cross-pair waiting.
+        self.softmax_exchange_sync_bar_pair02 = pipeline.NamedBarrier(
+            barrier_id=2, num_threads=(self.threads_per_warp * 2)
         )
-        self.epilogue_exchange_sync_bar = pipeline.NamedBarrier(
-            barrier_id=3, num_threads=(self.threads_per_warp * self.num_compute_warps)
+        self.softmax_exchange_sync_bar_pair13 = pipeline.NamedBarrier(
+            barrier_id=3, num_threads=(self.threads_per_warp * 2)
+        )
+        self.epilogue_exchange_sync_bar_pair02 = pipeline.NamedBarrier(
+            barrier_id=4, num_threads=(self.threads_per_warp * 2)
+        )
+        self.epilogue_exchange_sync_bar_pair13 = pipeline.NamedBarrier(
+            barrier_id=5, num_threads=(self.threads_per_warp * 2)
         )
 
     def _setup_attributes(self):
@@ -2552,8 +2560,13 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :rtype: tuple[pipeline.PipelineState, pipeline.PipelineState, pipeline.PipelineState, cutlass.Float32, cutlass.Float32, cutlass.Float32]
         """
 
+        mma_s_try_token = softmax_params.mma_s_pipeline.consumer_try_wait(
+            mma_s_consumer_state
+        )
         softmax_params.p_mma_pipeline.producer_acquire(p_mma_producer_state)
-        softmax_params.mma_s_pipeline.consumer_wait(mma_s_consumer_state)
+        softmax_params.mma_s_pipeline.consumer_wait(
+            mma_s_consumer_state, try_wait_token=mma_s_try_token
+        )
 
         # load S from tmem
         tStS_shape = softmax_params.tiled_mma_qk.partition_shape_C(
@@ -2590,6 +2603,12 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         arch = BaseDSL._get_dsl().get_arch_enum()
         if cutlass.const_expr(arch >= Arch.sm_100 and arch <= Arch.sm_100f):
             cute.copy(tmem_tiled_copy, tTR_tAcc, tTR_rAcc)
+            # Early S release: fence TMEM load and release S buffer immediately
+            # so MMA warp can start the next QK computation without waiting for
+            # the entire softmax computation to complete.
+            cute.arch.fence_view_async_tmem_load()
+            softmax_params.mma_s_pipeline.consumer_release(mma_s_consumer_state)
+            mma_s_consumer_state.advance()
             for i in cutlass.range_constexpr(cute.size(tTR_rAcc)):
                 if is_last_tile:
                     tTR_rAcc[i] = (
@@ -2623,6 +2642,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 tTR_tAcc_red,
                 (tTR_rAcc_red, tTR_rMax),
             )
+            # Early S release for sm103 path
+            cute.arch.fence_view_async_tmem_load()
+            softmax_params.mma_s_pipeline.consumer_release(mma_s_consumer_state)
+            mma_s_consumer_state.advance()
             tTR_rAcc = cute.make_tensor(tTR_rAcc_red.iterator, tTR_rAcc.layout)
             if is_last_tile:
                 for i in cutlass.range_constexpr(cute.size(tTR_rAcc)):
@@ -2642,9 +2665,15 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 row_max_new = cute.arch.fmax(row_max_new, tTR_rMax[0])
 
         # if warps in N is 2, reduce row_max across warps (0, 1) and (2, 3)
+        # Exchange pairs: {warp0, warp2} and {warp1, warp3} are independent.
+        # Use split barriers so each pair only waits for its partner.
         if cutlass.const_expr(self.warps_in_n == 2):
             common_params.smem_exchange[tidx] = row_max_new
-            self.softmax_exchange_sync_bar.wait()
+            warp_in_group = tidx // self.threads_per_warp
+            if warp_in_group % 2 == 0:
+                self.softmax_exchange_sync_bar_pair02.wait()
+            else:
+                self.softmax_exchange_sync_bar_pair13.wait()
             row_max_new = cute.arch.fmax(
                 row_max_new,
                 common_params.smem_exchange[
@@ -2677,6 +2706,17 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         for i in cutlass.range(cute.size(tTR_rAcc), vectorize=True, unroll_full=True):
             tTR_rAcc[i] = tTR_rAcc[i] * fma_b + fma_c
             tTR_rAcc[i] = cute.math.exp2(tTR_rAcc[i], fastmath=True)
+
+        # Compute row_sum immediately after exp2, before quantize/P-store.
+        # This overlaps the FADD reductions with any remaining MUFU pipeline drain
+        # and moves row_sum off the critical path between P-commit and p_cor-acquire.
+        row_sum = row_sum * correction_factor
+        row_sum_vec = (0.0, 0.0)
+        for i in cutlass.range_constexpr(0, cute.size(tTR_rAcc), 2):
+            row_sum_vec = cute.arch.add_packed_f32x2(
+                row_sum_vec, (tTR_rAcc[i], tTR_rAcc[i + 1])
+            )
+        row_sum = row_sum_vec[0] + row_sum_vec[1] + row_sum
 
         tTR_rS = cute.make_fragment_like(tTR_tS, self.q_dtype)
 
@@ -2729,14 +2769,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         softmax_params.p_mma_pipeline.producer_commit(p_mma_producer_state)
         p_mma_producer_state.advance()
 
-        # row_sum, using `add_packed_f32x2` to reduce the number of instructions
-        row_sum = row_sum * correction_factor
-        row_sum_vec = (0.0, 0.0)
-        for i in cutlass.range_constexpr(0, cute.size(tTR_rAcc), 2):
-            row_sum_vec = cute.arch.add_packed_f32x2(
-                row_sum_vec, (tTR_rAcc[i], tTR_rAcc[i + 1])
-            )
-        row_sum = row_sum_vec[0] + row_sum_vec[1] + row_sum
+        # Issue non-blocking try_acquire for p_cor pipeline early, so the
+        # blocking acquire at the end can overlap with remaining work.
+        p_cor_try_token = common_params.p_cor_pipeline.producer_try_acquire(
+            p_cor_producer_state
+        )
 
         # split kv case
         if cutlass.const_expr(is_local_last_tile):
@@ -2753,13 +2790,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             )
 
         # store correction factor/row_sum/row_max to tmem for correction warp
-        common_params.p_cor_pipeline.producer_acquire(p_cor_producer_state)
-
-        # fence between tmem load and mma s
-        cute.arch.fence_view_async_tmem_load()
-
-        softmax_params.mma_s_pipeline.consumer_release(mma_s_consumer_state)
-        mma_s_consumer_state.advance()
+        common_params.p_cor_pipeline.producer_acquire(
+            p_cor_producer_state, try_acquire_token=p_cor_try_token
+        )
 
         return (
             mma_s_consumer_state,
@@ -3026,9 +3059,14 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         tidx = common_params.tidx % (self.num_compute_warps * self.threads_per_warp)
 
         # exchange row_sum between warps (0, 1) and (2, 3)
+        # Use split barriers so each pair only waits for its partner.
         if cutlass.const_expr(self.warps_in_n == 2):
             common_params.smem_exchange[tidx] = row_sum
-            self.epilogue_exchange_sync_bar.wait()
+            warp_in_group = tidx // self.threads_per_warp
+            if warp_in_group % 2 == 0:
+                self.epilogue_exchange_sync_bar_pair02.wait()
+            else:
+                self.epilogue_exchange_sync_bar_pair13.wait()
             # (64, 2)
             row_sum = (
                 row_sum
