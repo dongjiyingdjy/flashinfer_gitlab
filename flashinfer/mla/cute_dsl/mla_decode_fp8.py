@@ -2980,8 +2980,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 ):
                     tTR_rAcc[i] = tTR_rAcc[i] * correction_factor
                 cute.copy(tmem_store_tiled_copy, tTR_rAcc, tTR_tAcc)
+                # Fence only needed when a TMEM store was actually performed
+                cute.arch.fence_view_async_tmem_store()
 
-            cute.arch.fence_view_async_tmem_store()
             common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
             mma_o_cs.advance()
             if cutlass.const_expr(iter_n == 0):
@@ -3020,6 +3021,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 ]
             )
 
+        # Pre-compute the output scale factor once to avoid redundant MUFU.RCP
+        # instructions inside the per-element loop.
+        epi_scale = epilogue_params.output_scale * cute.arch.rcp_approx(row_sum)
+
         # mma_o pipeline consumer wait
         for iter_n in cutlass.range_constexpr(self.iterations_pv_n):
             mma_o_cs = mma_o_cs_0 if iter_n == 0 else mma_o_cs_1
@@ -3031,18 +3036,19 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 )
             )
 
-            # load o
+            # load o from TMEM into registers
             cute.copy(tmem_load_tiled_copy, tTR_tAcc, tTR_rAcc)
 
-            # apply output scale and normalize by row_sum
+            # Early TMEM fence and release: free the TMEM buffer for MMA warp
+            # immediately after copying to registers, before the scale/STG work.
+            cute.arch.fence_view_async_tmem_load()
+            common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
+
+            # apply output scale and normalize by row_sum (using pre-computed epi_scale)
             for i in cutlass.range(
                 cute.size(tTR_rAcc), vectorize=True, unroll_full=True
             ):
-                tTR_rAcc[i] = (
-                    tTR_rAcc[i]
-                    * epilogue_params.output_scale
-                    * cute.arch.rcp_approx(row_sum)
-                )
+                tTR_rAcc[i] = tTR_rAcc[i] * epi_scale
 
             # store o to global memory
             tR2G_rO_src = None
@@ -3132,8 +3138,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                     if cute.elem_less(cLSE[tidx][0], common_params.H):
                         gLSE[tidx] = lse
 
-            cute.arch.fence_view_async_tmem_load()
-            common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
             mma_o_cs.advance()
             if cutlass.const_expr(iter_n == 0):
                 mma_o_cs_0 = mma_o_cs
@@ -3173,6 +3177,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 ]
             )
 
+        # Pre-compute the output scale factor once to avoid redundant MUFU.RCP
+        # instructions inside the per-element loop (rcp_approx generates MUFU.RCP
+        # which has 8-cycle throughput; hoisting saves ~64 redundant MUFU.RCP ops).
+        epi_scale = epilogue_params.output_scale * cute.arch.rcp_approx(row_sum)
+
         common_params.mma_o_pipelines[iter_n].consumer_wait(mma_o_cs)
         # tmem load tiled copy and partition results.
         tmem_load_tiled_copy, tAcc, tTR_tAcc, tTR_gO, tTR_cO, tTR_rAcc = (
@@ -3181,18 +3190,19 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             )
         )
 
-        # load o
+        # load o from TMEM into registers
         cute.copy(tmem_load_tiled_copy, tTR_tAcc, tTR_rAcc)
 
-        # apply output scale and normalize by row_sum
+        # Early TMEM fence and release: free the TMEM buffer for MMA warp
+        # immediately after copying to registers, before the scale/STG work.
+        cute.arch.fence_view_async_tmem_load()
+        common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
+
+        # apply output scale and normalize by row_sum (using pre-computed epi_scale)
         for i in cutlass.range(
             cute.size(tTR_rAcc), vectorize=True, unroll_full=True
         ):
-            tTR_rAcc[i] = (
-                tTR_rAcc[i]
-                * epilogue_params.output_scale
-                * cute.arch.rcp_approx(row_sum)
-            )
+            tTR_rAcc[i] = tTR_rAcc[i] * epi_scale
 
         # store o to global memory
         tR2G_rO_src = None
@@ -3282,8 +3292,6 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 if cute.elem_less(cLSE[tidx][0], common_params.H):
                     gLSE[tidx] = lse
 
-        cute.arch.fence_view_async_tmem_load()
-        common_params.mma_o_pipelines[iter_n].consumer_release(mma_o_cs)
         mma_o_cs.advance()
 
         return mma_o_cs
