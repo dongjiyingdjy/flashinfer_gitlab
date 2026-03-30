@@ -770,12 +770,12 @@ def trtllm_batch_decode_mla_sparse(
 
 @pytest.mark.parametrize(
     "layer_dimensions",
-    [supported_mla_layer_dimensions[0]],
+    [supported_mla_layer_dimensions[2]],
 )
 @pytest.mark.parametrize(
     "batch_size",
-    [1],
-    #[1, 2, 4, 8],
+    [4],
+    #[4, 8, 16],
 )
 @pytest.mark.parametrize("scale", [1.0])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
