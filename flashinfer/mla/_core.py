@@ -123,6 +123,9 @@ supported_mla_layer_dimensions = [
     MLALayerDimensions(
         head_dimensions=smaller_mla_dimensions, num_heads=32
     ),  # Smaller model dimensions
+    MLALayerDimensions(
+        head_dimensions=deepseek_mla_dimensions, num_heads=32
+    ),  # DSR1 dimensions with 32 heads
 ]
 
 

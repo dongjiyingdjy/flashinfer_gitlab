@@ -177,6 +177,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         is_persistent: bool,
         is_var_seq: bool,
         is_var_split_kv: bool,
+        fold_sq: bool = False,
     ):
         """Initializes the configuration for a Blackwell Multi-Head Latent Attention (MLA) kernel.
 
@@ -214,6 +215,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         self.page_size = page_size
         self.is_var_seq = is_var_seq
         self.is_var_split_kv = is_var_split_kv
+        self.fold_sq = fold_sq
         self.cluster_shape_mnk = (2, 1, 1)
         self.use_2cta_instrs = True
         # When using 2 CTAs with m=128: warps 0-1 handle accumulation for first half [0, n/2),
@@ -433,6 +435,35 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 stride=(lse.stride[2], lse.stride[1], lse.stride[0]),
             ),
         ) if not self.skip_lse else None
+
+        # When num_heads < M tile (128), fold seq_len_q into the head dimension
+        # to fill the MMA M dimension. E.g., H=32, S_q=4 → M_eff=128, S_q_eff=1.
+        # This works because MLA shares KV across all heads/queries independently.
+        if cutlass.const_expr(self.fold_sq):
+            def _fold_sq_4d(t):
+                # [H, D, S_q, B] → [H*S_q, D, 1, B]
+                # Use S_q//S_q to get a "dynamic 1" preserving MLIR value type
+                dyn_one = t.shape[2] // t.shape[2]
+                return cute.make_tensor(
+                    t.iterator,
+                    cute.make_layout(
+                        (t.shape[0] * t.shape[2], t.shape[1], dyn_one, t.shape[3]),
+                        stride=(t.stride[0], t.stride[1], t.stride[3], t.stride[3]),
+                    ),
+                )
+            q_latent = _fold_sq_4d(q_latent)
+            q_rope = _fold_sq_4d(q_rope)
+            o = _fold_sq_4d(o)
+            if cutlass.const_expr(not self.skip_lse):
+                # [H, S_q, B] → [H*S_q, 1, B]
+                dyn_one = lse.shape[1] // lse.shape[1]
+                lse = cute.make_tensor(
+                    lse.iterator,
+                    cute.make_layout(
+                        (lse.shape[0] * lse.shape[1], dyn_one, lse.shape[2]),
+                        stride=(lse.stride[0], lse.stride[2], lse.stride[2]),
+                    ),
+                )
 
         acc_o, acc_lse = self.initialize_workspace(
             q_latent.shape[0],
@@ -3584,7 +3615,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             return False
         if is_var_split_kv and not is_var_seq:
             return False
-        if H > 128 or (H < 128 and split_kv != 1):
+        if H > mma_qk_tiler_mn[0]:
+            return False
+        # When H < M tile, fold S_q into H to fill the MMA M dimension
+        if H < mma_qk_tiler_mn[0] and H * S != mma_qk_tiler_mn[0]:
             return False
         if S <= 0 or S > 4:
             return False
@@ -3863,13 +3897,14 @@ def run(
     ):
         block_split_kvs_ref, block_split_kvs, block_split_kvs_gpu = None, None, None
         # check if split_kv is valid otherwise do auto setting of split_kv
+        # Use seq_len_q_for_split (effective S_q=1 when folding heads)
         if is_var_split_kv:
             block_split_kvs_ref = torch.zeros([batch_size], dtype=torch.int32)
             for b in range(batch_size):
                 block_split_kvs_ref[b] = (
                     BlackwellMultiHeadLatentAttentionForwardFP8.get_split_kv(
                         batch_size,
-                        seq_len_q,
+                        seq_len_q_for_split,
                         cache_seqs_ref[b].item(),
                         mma_qk_tiler_mn,
                         max_active_clusters * cluster_shape_mnk[0],
@@ -3883,7 +3918,7 @@ def run(
         elif split_kv <= 0:
             split_kv = BlackwellMultiHeadLatentAttentionForwardFP8.get_split_kv(
                 batch_size,
-                seq_len_q,
+                seq_len_q_for_split,
                 cache_seqs_ref[0].item(),
                 mma_qk_tiler_mn,
                 max_active_clusters * cluster_shape_mnk[0],
@@ -3919,6 +3954,9 @@ def run(
     max_active_clusters = hardware_info.get_max_active_clusters(
         cluster_shape_mnk[0] * cluster_shape_mnk[1]
     )
+    # When num_heads < M tile, fold seq_len_q into heads (effective S_q=1)
+    fold_sq = num_heads < mma_qk_tiler_mn[0] and num_heads * seq_len_q == mma_qk_tiler_mn[0]
+    seq_len_q_for_split = 1 if fold_sq else seq_len_q
     split_kv, block_split_kvs_ref, block_split_kvs, block_split_kvs_torch = (
         create_block_split_kvs(
             batch_size,
@@ -3983,8 +4021,11 @@ def run(
         is_lse=True,
         seq_len_q=seq_len_q,
     )
+    # Use effective dimensions for workspace when folding S_q into heads
+    num_heads_eff = num_heads * seq_len_q if fold_sq else num_heads
+    seq_len_q_eff = 1 if fold_sq else seq_len_q
     workspace, workspace_torch = create_workspace(
-        num_heads, seq_len_q, latent_dim, batch_size, split_kv, acc_dtype
+        num_heads_eff, seq_len_q_eff, latent_dim, batch_size, split_kv, acc_dtype
     )
 
     mla = BlackwellMultiHeadLatentAttentionForwardFP8(
@@ -3998,6 +4039,7 @@ def run(
         is_persistent,
         is_var_seq,
         is_var_split_kv,
+        fold_sq=fold_sq,
     )
 
     # Get current CUDA stream from PyTorch
@@ -4231,7 +4273,7 @@ def run(
             seq_len_q=seq_len_q,
         )
         workspace, workspace_torch = create_workspace(
-            num_heads, seq_len_q, latent_dim, batch_size, _split_kv, acc_dtype
+            num_heads_eff, seq_len_q_eff, latent_dim, batch_size, _split_kv, acc_dtype
         )
         return testing.JitArguments(
             q_latent,

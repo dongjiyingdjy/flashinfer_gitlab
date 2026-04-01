@@ -115,6 +115,7 @@ def _get_compiled_mla_kernel(
     is_var_split_kv: bool,
     skip_correction_threshold: float = 0.0,
     is_workspace_size_zero: bool = False,
+    fold_sq: bool = False,
 ) -> Callable:
     """Compile and cache an MLA decode kernel.
 
@@ -140,7 +141,7 @@ def _get_compiled_mla_kernel(
     cutlass_dtype = torch_to_cutlass_dtype(torch_dtype)
     cutlass_out_dtype = cutlass.BFloat16 if is_fp8 else cutlass_dtype
 
-    kernel_obj = KernelClass(
+    kernel_kwargs = dict(
         acc_dtype=cutlass.Float32,
         lse_dtype=cutlass.Float32,
         mma_qk_tiler_mn=mma_qk_tiler_mn,
@@ -154,6 +155,9 @@ def _get_compiled_mla_kernel(
         is_var_seq=is_var_seq,
         is_var_split_kv=is_var_split_kv,
     )
+    if is_fp8 and fold_sq:
+        kernel_kwargs["fold_sq"] = True
+    kernel_obj = KernelClass(**kernel_kwargs)
 
     # All dimensions as sym_int — this matches the original kernel's use of
     # mark_compact_shape_dynamic, which makes ALL shapes dynamic CuTe Integers.
@@ -359,24 +363,24 @@ def cute_dsl_mla_decode(
     # Runtime validation (int comparisons only, negligible overhead)
     if max_seq_len <= 0:
         raise ValueError(f"max_seq_len must be > 0, got {max_seq_len}")
-    # H=128: standard DeepSeek-V3 MLA config; H=1: used by split-kv reduction path.
-    # Values 2..127 are not supported by the kernel's tile config.
-    if H < 128 and H != 1:
+    # H=128: standard config; H<128: fold seq_len_q into heads (requires H*q_len==128)
+    mma_m_tile = 128
+    fold_sq = H < mma_m_tile and H * q_len == mma_m_tile
+    if H < mma_m_tile and not fold_sq:
         raise ValueError(
-            f"cute_dsl_mla_decode requires num_heads >= 128 (or 1 for reduction), got {H}"
+            f"cute_dsl_mla_decode requires num_heads >= {mma_m_tile} or "
+            f"num_heads * q_len == {mma_m_tile}, got num_heads={H}, q_len={q_len}"
         )
+
+    # When folding, the effective dimensions change for split_kv/workspace
+    H_eff = H * q_len if fold_sq else H
+    q_len_eff = 1 if fold_sq else q_len
 
     # Cached split_kv and workspace_size computation
     max_active_blocks = get_num_sm(query.device)
     split_kv, workspace_size = _get_split_kv_and_workspace_size(
-        B, q_len, H, kv_lora_rank, max_active_blocks
+        B, q_len_eff, H_eff, kv_lora_rank, max_active_blocks
     )
-
-    if H < 128 and split_kv != 1:
-        raise ValueError(
-            f"cute_dsl_mla_decode: num_heads={H} < 128 requires split_kv==1, "
-            f"got split_kv={split_kv}"
-        )
 
     # Prepare workspace: slice of contiguous 1D buffer is already contiguous
     assert workspace_buffer.dtype == torch.int8, (
@@ -438,6 +442,7 @@ def cute_dsl_mla_decode(
         is_var_split_kv=is_var_split_kv,
         skip_correction_threshold=skip_correction_threshold,
         is_workspace_size_zero=is_workspace_size_zero,
+        fold_sq=fold_sq,
     )
 
     # Call the kernel
