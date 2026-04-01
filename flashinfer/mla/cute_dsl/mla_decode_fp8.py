@@ -3618,7 +3618,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         if H > mma_qk_tiler_mn[0]:
             return False
         # When H < M tile, fold S_q into H to fill the MMA M dimension
-        if H < mma_qk_tiler_mn[0] and H * S != mma_qk_tiler_mn[0]:
+        # H*S can be < M tile (padding with zeros via TMA OOB); it just can't exceed it
+        if H < mma_qk_tiler_mn[0] and H * S > mma_qk_tiler_mn[0]:
             return False
         if S <= 0 or S > 4:
             return False
@@ -3955,7 +3956,8 @@ def run(
         cluster_shape_mnk[0] * cluster_shape_mnk[1]
     )
     # When num_heads < M tile, fold seq_len_q into heads (effective S_q=1)
-    fold_sq = num_heads < mma_qk_tiler_mn[0] and num_heads * seq_len_q == mma_qk_tiler_mn[0]
+    # H*S_q may be < M tile; TMA zero-fills OOB rows, epilogue guards skip padded output
+    fold_sq = num_heads < mma_qk_tiler_mn[0] and num_heads * seq_len_q <= mma_qk_tiler_mn[0]
     seq_len_q_for_split = 1 if fold_sq else seq_len_q
     split_kv, block_split_kvs_ref, block_split_kvs, block_split_kvs_torch = (
         create_block_split_kvs(

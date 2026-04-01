@@ -363,13 +363,14 @@ def cute_dsl_mla_decode(
     # Runtime validation (int comparisons only, negligible overhead)
     if max_seq_len <= 0:
         raise ValueError(f"max_seq_len must be > 0, got {max_seq_len}")
-    # H=128: standard config; H<128: fold seq_len_q into heads (requires H*q_len==128)
+    # H=128: standard config; H<128: fold seq_len_q into heads
+    # H*q_len can be < M tile (padding with zeros via TMA OOB)
     mma_m_tile = 128
-    fold_sq = H < mma_m_tile and H * q_len == mma_m_tile
+    fold_sq = H < mma_m_tile and H * q_len <= mma_m_tile
     if H < mma_m_tile and not fold_sq:
         raise ValueError(
             f"cute_dsl_mla_decode requires num_heads >= {mma_m_tile} or "
-            f"num_heads * q_len == {mma_m_tile}, got num_heads={H}, q_len={q_len}"
+            f"num_heads * q_len <= {mma_m_tile}, got num_heads={H}, q_len={q_len}"
         )
 
     # When folding, the effective dimensions change for split_kv/workspace

@@ -770,7 +770,9 @@ def trtllm_batch_decode_mla_sparse(
 
 @pytest.mark.parametrize(
     "layer_dimensions",
-    [supported_mla_layer_dimensions[2]],
+    [#supported_mla_layer_dimensions[3], # num heads = 32
+     supported_mla_layer_dimensions[4], # num heads = 16
+     ],
 )
 @pytest.mark.parametrize(
     "batch_size",
@@ -779,7 +781,7 @@ def trtllm_batch_decode_mla_sparse(
 )
 @pytest.mark.parametrize("scale", [1.0])
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
-@pytest.mark.parametrize("page_size", [64])
+@pytest.mark.parametrize("page_size", [32])
 @pytest.mark.parametrize(
     "q_len_per_request", [4]
     #"q_len_per_request", [1, 4]
@@ -807,7 +809,11 @@ def test_trtllm_batch_decode_mla(
     if backend == "xqa" and layer_dimensions.num_heads != 128:
         pytest.skip("XQA MLA only supports 128 query heads (head_group_ratio=128)")
     if backend == "cute-dsl" and layer_dimensions.num_heads < 128:
-        pytest.skip("cute-dsl MLA requires num_heads >= 128")
+        if layer_dimensions.num_heads * q_len_per_request > 128:
+            pytest.skip(
+                f"cute-dsl MLA requires num_heads * q_len <= 128 when num_heads < 128, "
+                f"got {layer_dimensions.num_heads} * {q_len_per_request} = {layer_dimensions.num_heads * q_len_per_request}"
+            )
 
     trtllm_batch_decode_mla(
         layer_dimensions,
