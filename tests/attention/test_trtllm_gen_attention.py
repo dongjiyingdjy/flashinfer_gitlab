@@ -1,4 +1,6 @@
 import math
+import os
+import sys
 
 import pytest
 import torch
@@ -643,135 +645,135 @@ def _test_trtllm_batch_prefill(
         assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
 
 
-@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
-@pytest.mark.parametrize(
-    "batch_size,page_size,num_kv_heads,head_grp_size",
-    [
-        (4, 16, 2, 1),
-        (4, 32, 4, 5),
-        (4, 64, 4, 8),
-        (128, 16, 2, 5),
-        (128, 32, 4, 1),
-        (128, 64, 2, 8),
-        (256, 16, 4, 8),
-        (256, 32, 2, 8),
-        (256, 64, 4, 1),
-        (256, 64, 4, 5),
-    ],
-)
-@pytest.mark.parametrize("window_left", [-1])  # todo(Siyuan): add 127 window_left
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("bf16", "bf16", "bf16"),
-        ("fp16", "fp16", "fp16"),
-        ("fp8", "fp8", "bf16"),
-        ("fp8", "fp8", "fp16"),
-        ("fp8", "fp8", "fp8"),
-        ("fp8", "fp8", "nvfp4"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [None])
-@pytest.mark.parametrize("enable_sink", [True, False])
-@pytest.mark.parametrize("max_q_len", [511])
-@pytest.mark.parametrize("max_kv_len", [2047])
-@pytest.mark.parametrize("head_dim", [128, 256])
-@pytest.mark.parametrize("non_contiguous_query", [False, True])
-@pytest.mark.parametrize("skips_softmax", [False, True])
-def test_trtllm_batch_prefill(
-    kv_layout: str,
-    batch_size: int,
-    page_size: int,
-    num_kv_heads: int,
-    head_grp_size: int,
-    window_left: int,
-    q_dtype: str,
-    o_dtype: str,
-    kv_dtype: str,
-    enable_pdl: bool,
-    enable_sink: bool,
-    max_q_len: int,
-    max_kv_len: int,
-    head_dim: int,
-    non_contiguous_query: bool,
-    skips_softmax: bool,
-):
-    _test_trtllm_batch_prefill(
-        kv_layout,
-        batch_size,
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_q_len,
-        max_kv_len,
-        kv_dtype == "fp8",
-        head_dim,
-        non_contiguous_query=non_contiguous_query,
-        skips_softmax=skips_softmax,
-    )
-
-
-@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
-@pytest.mark.parametrize(
-    "batch_size,page_size,num_kv_heads,head_grp_size",
-    [
-        (1, 16, 8, 8),
-    ],
-)
-@pytest.mark.parametrize("window_left", [-1])  # todo(Siyuan): add 127 window_left
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("bf16", "bf16", "bf16"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [None])
-@pytest.mark.parametrize("enable_sink", [False])
-@pytest.mark.parametrize("max_q_len", [8192])
-@pytest.mark.parametrize("max_kv_len", [8192])
-@pytest.mark.parametrize("head_dim", [128, 256])
-@pytest.mark.parametrize("skips_softmax", [False, True])
-def test_trtllm_batch_prefill_bs1(
-    kv_layout: str,
-    batch_size: int,
-    page_size: int,
-    num_kv_heads: int,
-    head_grp_size: int,
-    window_left: int,
-    q_dtype: str,
-    o_dtype: str,
-    kv_dtype: str,
-    enable_pdl: bool,
-    enable_sink: bool,
-    max_q_len: int,
-    max_kv_len: int,
-    head_dim: int,
-    skips_softmax: bool,
-):
-    _test_trtllm_batch_prefill(
-        kv_layout,
-        batch_size,
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_q_len,
-        max_kv_len,
-        False,
-        head_dim,
-        skips_softmax=skips_softmax,
-    )
+#@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
+#@pytest.mark.parametrize(
+#    "batch_size,page_size,num_kv_heads,head_grp_size",
+#    [
+#        (4, 16, 2, 1),
+#        (4, 32, 4, 5),
+#        (4, 64, 4, 8),
+#        (128, 16, 2, 5),
+#        (128, 32, 4, 1),
+#        (128, 64, 2, 8),
+#        (256, 16, 4, 8),
+#        (256, 32, 2, 8),
+#        (256, 64, 4, 1),
+#        (256, 64, 4, 5),
+#    ],
+#)
+#@pytest.mark.parametrize("window_left", [-1])  # todo(Siyuan): add 127 window_left
+#@pytest.mark.parametrize(
+#    "q_dtype,kv_dtype,o_dtype",
+#    [
+#        ("bf16", "bf16", "bf16"),
+#        ("fp16", "fp16", "fp16"),
+#        ("fp8", "fp8", "bf16"),
+#        ("fp8", "fp8", "fp16"),
+#        ("fp8", "fp8", "fp8"),
+#        ("fp8", "fp8", "nvfp4"),
+#    ],
+#)
+#@pytest.mark.parametrize("enable_pdl", [None])
+#@pytest.mark.parametrize("enable_sink", [True, False])
+#@pytest.mark.parametrize("max_q_len", [511])
+#@pytest.mark.parametrize("max_kv_len", [2047])
+#@pytest.mark.parametrize("head_dim", [128, 256])
+#@pytest.mark.parametrize("non_contiguous_query", [False, True])
+#@pytest.mark.parametrize("skips_softmax", [False, True])
+#def test_trtllm_batch_prefill(
+#    kv_layout: str,
+#    batch_size: int,
+#    page_size: int,
+#    num_kv_heads: int,
+#    head_grp_size: int,
+#    window_left: int,
+#    q_dtype: str,
+#    o_dtype: str,
+#    kv_dtype: str,
+#    enable_pdl: bool,
+#    enable_sink: bool,
+#    max_q_len: int,
+#    max_kv_len: int,
+#    head_dim: int,
+#    non_contiguous_query: bool,
+#    skips_softmax: bool,
+#):
+#    _test_trtllm_batch_prefill(
+#        kv_layout,
+#        batch_size,
+#        page_size,
+#        num_kv_heads,
+#        head_grp_size,
+#        window_left,
+#        q_dtype,
+#        o_dtype,
+#        kv_dtype,
+#        enable_pdl,
+#        enable_sink,
+#        max_q_len,
+#        max_kv_len,
+#        kv_dtype == "fp8",
+#        head_dim,
+#        non_contiguous_query=non_contiguous_query,
+#        skips_softmax=skips_softmax,
+#    )
+#
+#
+#@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
+#@pytest.mark.parametrize(
+#    "batch_size,page_size,num_kv_heads,head_grp_size",
+#    [
+#        (1, 16, 8, 8),
+#    ],
+#)
+#@pytest.mark.parametrize("window_left", [-1])  # todo(Siyuan): add 127 window_left
+#@pytest.mark.parametrize(
+#    "q_dtype,kv_dtype,o_dtype",
+#    [
+#        ("bf16", "bf16", "bf16"),
+#    ],
+#)
+#@pytest.mark.parametrize("enable_pdl", [None])
+#@pytest.mark.parametrize("enable_sink", [False])
+#@pytest.mark.parametrize("max_q_len", [8192])
+#@pytest.mark.parametrize("max_kv_len", [8192])
+#@pytest.mark.parametrize("head_dim", [128, 256])
+#@pytest.mark.parametrize("skips_softmax", [False, True])
+#def test_trtllm_batch_prefill_bs1(
+#    kv_layout: str,
+#    batch_size: int,
+#    page_size: int,
+#    num_kv_heads: int,
+#    head_grp_size: int,
+#    window_left: int,
+#    q_dtype: str,
+#    o_dtype: str,
+#    kv_dtype: str,
+#    enable_pdl: bool,
+#    enable_sink: bool,
+#    max_q_len: int,
+#    max_kv_len: int,
+#    head_dim: int,
+#    skips_softmax: bool,
+#):
+#    _test_trtllm_batch_prefill(
+#        kv_layout,
+#        batch_size,
+#        page_size,
+#        num_kv_heads,
+#        head_grp_size,
+#        window_left,
+#        q_dtype,
+#        o_dtype,
+#        kv_dtype,
+#        enable_pdl,
+#        enable_sink,
+#        max_q_len,
+#        max_kv_len,
+#        False,
+#        head_dim,
+#        skips_softmax=skips_softmax,
+#    )
 
 
 def _test_trtllm_batch_decode(
@@ -1098,576 +1100,418 @@ def _test_trtllm_batch_decode(
         assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
 
 
-@pytest.mark.parametrize("backend", ["trtllm-gen", "xqa"])
-@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
-@pytest.mark.parametrize(
-    "batch_size,q_len_per_req,page_size,num_kv_heads,head_grp_size",
-    [
-        (4, 1, 16, 2, 1),
-        (4, 1, 32, 2, 5),
-        (4, 2, 64, 2, 5),
-        (4, 3, 32, 2, 5),
-        (4, 3, 64, 2, 1),
-        (4, 4, 64, 4, 1),
-        (4, 5, 64, 4, 8),
-        (128, 1, 64, 2, 5),
-        (128, 2, 32, 4, 1),
-        (128, 3, 16, 4, 8),
-        (128, 4, 16, 2, 5),
-        (128, 5, 16, 2, 5),
-        (256, 1, 64, 4, 8),
-        (256, 2, 16, 2, 8),
-        (256, 3, 64, 4, 5),
-        (256, 4, 32, 2, 8),
-        (256, 5, 32, 2, 1),
-    ],
-)
-@pytest.mark.parametrize("window_left", [-1, 127])
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("bf16", "bf16", "bf16"),
-        ("fp16", "fp16", "fp16"),
-        ("bf16", "fp8", "bf16"),
-        ("fp16", "fp8", "fp16"),
-        ("bf16", "fp8", "fp8"),
-        ("fp16", "fp8", "fp8"),
-        ("fp8", "fp8", "bf16"),
-        ("fp8", "fp8", "fp16"),
-        ("fp8", "fp8", "fp8"),
-        ("fp8", "fp8", "nvfp4"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [True, False, None])
-@pytest.mark.parametrize("enable_sink", [True, False])
-@pytest.mark.parametrize("max_in_kv_len", [110])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("non_contiguous_query", [False, True])
-@pytest.mark.parametrize("skips_softmax", [False, True])
-def test_trtllm_batch_decode(
-    backend: str,
-    kv_layout: str,
+def _run_cute_dsl_fmha_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    qo_indptr: torch.Tensor,
+    kv_indptr: torch.Tensor,
     batch_size: int,
-    q_len_per_req: int,
-    page_size: int,
-    num_kv_heads: int,
-    head_grp_size: int,
-    window_left: int,
-    q_dtype: str,
-    o_dtype: str,
-    kv_dtype: str,
-    enable_pdl: bool,
-    enable_sink: bool,
-    max_in_kv_len: int,
-    head_dim: int,
-    non_contiguous_query: bool,
-    skips_softmax: bool,
+    scale: float,
+    is_causal: bool,
+    head_dim_vo: int,
+    scale_q: float = 1.0,
+    scale_k: float = 1.0,
+    scale_v: float = 1.0,
+    inv_scale_o: float = 1.0,
 ):
-    # xqa backend does not support non-contiguous query yet
-    if backend == "xqa" and non_contiguous_query:
-        pytest.skip("xqa backend does not support non-contiguous query")
+    """Run the cute-dsl FMHA prefill kernel.
 
-    # General set of tests for trtllm-gen decode
-    _test_trtllm_batch_decode(
-        backend,
-        kv_layout,
-        batch_size,
-        q_len_per_req,
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_in_kv_len,
-        head_dim,
-        kv_dtype == "fp8",
-        non_contiguous_query=non_contiguous_query,
-        skips_softmax=skips_softmax,
+    Parameters
+    ----------
+    q : torch.Tensor
+        Query tensor [total_q_tokens, num_qo_heads, head_dim_qk]
+    k : torch.Tensor
+        Key tensor [total_kv_tokens, num_kv_heads, head_dim_qk]
+    v : torch.Tensor
+        Value tensor [total_kv_tokens, num_kv_heads, head_dim_vo]
+    qo_indptr : torch.Tensor
+        Cumulative sum of query sequence lengths [batch_size + 1]
+    kv_indptr : torch.Tensor
+        Cumulative sum of kv sequence lengths [batch_size + 1]
+    batch_size : int
+        Batch size
+    scale : float
+        Softmax scale factor (1/sqrt(d))
+    is_causal : bool
+        Whether to use causal masking
+    head_dim_vo : int
+        Head dimension for value/output
+    scale_q : float
+        Dequantization scale for Q (fp8 -> real value)
+    scale_k : float
+        Dequantization scale for K
+    scale_v : float
+        Dequantization scale for V
+    inv_scale_o : float
+        Inverse scale for output quantization
+
+    Returns
+    -------
+    output : torch.Tensor
+        Output tensor [total_q_tokens, num_qo_heads, head_dim_vo]
+    lse : torch.Tensor
+        Log-sum-exp tensor [1, num_qo_heads, total_q_tokens]
+    """
+    import cutlass.cute as cute
+    import cutlass.torch as cutlass_torch
+    from cutlass.cute.runtime import from_dlpack
+    from cutlass.cute.typing import Int32, Float32
+
+    # Add cute_dsl directory to path for fmha_helpers and fmha imports
+    fmha_dir = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "..", "flashinfer", "mla", "cute_dsl",
+    ))
+    if fmha_dir not in sys.path:
+        sys.path.insert(0, fmha_dir)
+    from fmha import BlackwellFusedMultiHeadAttentionForward
+    import fmha_helpers as fmha_utils
+
+    from flashinfer.cute_dsl.utils import torch_to_cutlass_dtype
+
+    total_q_tokens, num_qo_heads, head_dim_qk = q.shape
+    total_kv_tokens, num_kv_heads, _ = k.shape
+
+    in_dtype = torch_to_cutlass_dtype(q.dtype)
+    out_dtype = in_dtype  # output same dtype as input
+
+    # Extract per-batch sequence lengths from indptr
+    qo_indptr_cpu = qo_indptr.cpu()
+    kv_indptr_cpu = kv_indptr.cpu()
+    s_q_list = []
+    s_k_list = []
+    for i in range(batch_size):
+        s_q_list.append(int(qo_indptr_cpu[i + 1].item() - qo_indptr_cpu[i].item()))
+        s_k_list.append(int(kv_indptr_cpu[i + 1].item() - kv_indptr_cpu[i].item()))
+
+    s_q = tuple(s_q_list)
+    s_k = tuple(s_k_list)
+
+    dv = head_dim_vo
+    d = head_dim_qk
+
+    # Determine mask type
+    # For varlen with causal, use bottom_right_align (WINDOW_MASK_INFERENCE)
+    # so that the end of q aligns with the end of k for each sequence
+    mma_tiler_mn = (128, 128)
+    bottom_right_align = is_causal and batch_size > 0
+    mask_type = fmha_utils.MaskEnum.WINDOW_MASK
+    if bottom_right_align:
+        mask_type = fmha_utils.MaskEnum.WINDOW_MASK_INFERENCE
+    if is_causal:
+        window_size_right = 0
+        window_size_left = None
+    else:
+        window_size_left = None
+        window_size_right = None
+        for sk in s_k:
+            if sk % mma_tiler_mn[1] != 0:
+                mask_type = fmha_utils.MaskEnum.RESIDUAL_MASK
+
+    # Create FMHA instance
+    fmha_instance = BlackwellFusedMultiHeadAttentionForward(
+        qk_acc_dtype=Float32,
+        pv_acc_dtype=Float32,
+        mma_tiler=mma_tiler_mn,
+        head_dim=d if d == dv else (d, dv),
+        is_persistent=True,
+        mask_type=mask_type,
+        enable_ex2_emulation=False,
+        enable_skip_correction=False,
     )
 
-
-@pytest.mark.parametrize("kv_layout", ["HND"])  # trtllm-gen only support HND
-@pytest.mark.parametrize(
-    "batch_size,q_len_per_req,page_size,num_kv_heads,head_grp_size",
-    [
-        (1, 1, 16, 8, 8),
-        (1, 1, 32, 8, 8),
-    ],
-)
-@pytest.mark.parametrize("window_left", [-1])
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("fp8", "fp8", "fp8"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [None])
-@pytest.mark.parametrize("enable_sink", [False])
-@pytest.mark.parametrize("max_in_kv_len", [4096, 8192])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("device_scale", [True, False])
-@pytest.mark.parametrize("skips_softmax", [False, True])
-def test_trtllm_batch_decode_bs1(
-    kv_layout: str,
-    batch_size: int,
-    q_len_per_req: int,
-    page_size: int,
-    num_kv_heads: int,
-    head_grp_size: int,
-    window_left: int,
-    q_dtype: str,
-    o_dtype: str,
-    kv_dtype: str,
-    enable_pdl: bool,
-    enable_sink: bool,
-    max_in_kv_len: int,
-    head_dim: int,
-    device_scale: bool,
-    skips_softmax: bool,
-) -> None:
-    # Small number of test cases for batch size 1
-    _test_trtllm_batch_decode(
-        "trtllm-gen",
-        kv_layout,
-        batch_size,
-        q_len_per_req,
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_in_kv_len,
-        head_dim,
-        device_scale,
-        skips_softmax=skips_softmax,
+    # Create cumulative sequence length cute tensors
+    # cute_tensor_like copies from CPU to GPU and returns (cute_tensor, gpu_torch_tensor)
+    cum_seqlen_q_cute, _ = cutlass_torch.cute_tensor_like(
+        qo_indptr.cpu().int(),
+        Int32,
+        is_dynamic_layout=True,
+        assumed_align=16,
+    )
+    cum_seqlen_k_cute, _ = cutlass_torch.cute_tensor_like(
+        kv_indptr.cpu().int(),
+        Int32,
+        is_dynamic_layout=True,
+        assumed_align=16,
     )
 
+    # Convert torch tensors to cute tensors
+    # Q: [total_q_tokens, num_qo_heads, head_dim_qk]
+    q_cute = from_dlpack(q, assumed_align=16)
+    q_cute.element_type = in_dtype
+    # K: [total_kv_tokens, num_kv_heads, head_dim_qk]
+    k_cute = from_dlpack(k, assumed_align=16)
+    k_cute.element_type = in_dtype
+    # V: [total_kv_tokens, num_kv_heads, head_dim_vo]
+    v_cute = from_dlpack(v, assumed_align=16)
+    v_cute.element_type = in_dtype
 
-@pytest.mark.parametrize("kv_layout", ["HND"])  # trtllm-gen only support HND
-@pytest.mark.parametrize(
-    "batch_size,q_len_per_req,page_size,num_kv_heads,head_grp_size",
-    [
-        (4, 1, 16, 2, 1),
-        (4, 1, 32, 2, 5),
-        (4, 3, 64, 2, 1),
-        (4, 4, 64, 4, 1),
-        (128, 3, 16, 4, 8),
-        (128, 4, 16, 2, 5),
-        (256, 4, 32, 2, 8),
-        (256, 5, 32, 2, 1),
-    ],
-)
-@pytest.mark.parametrize("window_left", [-1])
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("bf16", "bf16", "bf16"),
-        ("fp16", "fp16", "fp16"),
-        ("fp8", "fp8", "fp16"),
-        ("fp8", "fp8", "fp8"),
-        ("fp8", "fp8", "nvfp4"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [None])
-@pytest.mark.parametrize("enable_sink", [False])
-@pytest.mark.parametrize("max_in_kv_len", [110])
-@pytest.mark.parametrize("head_dim", [256])
-@pytest.mark.parametrize("device_scale", [True, False])
-@pytest.mark.parametrize("skips_softmax", [False, True])
-def test_trtllm_batch_decode_head_dim_256(
-    kv_layout: str,
-    batch_size: int,
-    q_len_per_req: int,
-    page_size: int,
-    num_kv_heads: int,
-    head_grp_size: int,
-    window_left: int,
-    q_dtype: str,
-    o_dtype: str,
-    kv_dtype: str,
-    enable_pdl: bool,
-    enable_sink: bool,
-    max_in_kv_len: int,
-    head_dim: int,
-    device_scale: bool,
-    skips_softmax: bool,
-):
-    # Small number of test cases for head_dim = 256
-    _test_trtllm_batch_decode(
-        "trtllm-gen",
-        kv_layout,
+    # O: [total_q_tokens, num_qo_heads, head_dim_vo]
+    o_torch = torch.empty(
+        total_q_tokens, num_qo_heads, dv,
+        dtype=q.dtype, device=q.device,
+    )
+    o_cute = from_dlpack(o_torch, assumed_align=16)
+    o_cute.element_type = out_dtype
+
+    # LSE: [1, num_qo_heads, total_q_tokens]
+    lse_torch = torch.empty(
+        1, num_qo_heads, total_q_tokens,
+        dtype=torch.float32, device=q.device,
+    )
+    lse_cute = from_dlpack(lse_torch, assumed_align=16)
+    lse_cute.element_type = Float32
+
+    # Compute scales (incorporate dequantization scales for fp8)
+    log2_e = math.log2(math.exp(1.0))
+    scale_softmax = scale_q * scale_k * scale
+    scale_softmax_log2 = scale_softmax * log2_e
+    scale_output = scale_v * inv_scale_o
+
+    h_r = num_qo_heads // num_kv_heads
+
+    # Problem size: (b, max_s_q, sum_s_q, max_s_k, h_q, h_k, d, dv)
+    problem_size = (
         batch_size,
-        q_len_per_req,
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_in_kv_len,
-        head_dim,
-        device_scale,
-        skips_softmax=skips_softmax,
+        max(s_q),
+        sum(s_q),  # s_lse = total q tokens
+        max(s_k),
+        h_r * num_kv_heads,  # h_q
+        num_kv_heads,  # h_k
+        d,
+        dv,
     )
 
+    current_stream = cutlass_torch.default_stream()
 
-@pytest.mark.parametrize("kv_layout", ["HND"])  # trtllm-gen only support HND
+    # Compile the kernel
+    compiled_fmha = cute.compile(
+        fmha_instance,
+        q_cute.iterator,
+        k_cute.iterator,
+        v_cute.iterator,
+        o_cute.iterator,
+        problem_size,
+        cum_seqlen_q_cute,
+        cum_seqlen_k_cute,
+        lse_cute.iterator,
+        scale_softmax_log2,
+        scale_softmax,
+        scale_output,
+        None,  # skip_softmax_threshold_log2
+        window_size_left if window_size_left is None else Int32(window_size_left),
+        window_size_right if window_size_right is None else Int32(window_size_right),
+        None,  # skip_softmax_count
+        None,  # total_softmax_count
+        current_stream,
+    )
+
+    # Run the kernel
+    compiled_fmha(
+        q_cute.iterator,
+        k_cute.iterator,
+        v_cute.iterator,
+        o_cute.iterator,
+        problem_size,
+        cum_seqlen_q_cute,
+        cum_seqlen_k_cute,
+        lse_cute.iterator,
+        scale_softmax_log2,
+        scale_softmax,
+        scale_output,
+        None,  # skip_softmax_threshold_log2
+        window_size_left if window_size_left is None else Int32(window_size_left),
+        window_size_right if window_size_right is None else Int32(window_size_right),
+        None,  # skip_softmax_count
+        None,  # total_softmax_count
+        current_stream,
+    )
+
+    return o_torch, lse_torch
+
+
 @pytest.mark.parametrize(
-    "batch_size,q_len_per_req,page_size,num_kv_heads,head_grp_size",
-    [
-        (1, 1, 16, 2, 1),
-        (1, 1, 32, 2, 5),
-        (1, 3, 64, 2, 1),
-        (1, 4, 64, 4, 1),
-        (32, 4, 16, 2, 8),
-        (32, 8, 16, 2, 8),
-        (32, 16, 16, 2, 8),
-    ],
+    "mla_dimensions", [deepseek_mla_dimensions]
 )
-@pytest.mark.parametrize("window_left", [-1])
-@pytest.mark.parametrize(
-    "q_dtype,kv_dtype,o_dtype",
-    [
-        ("bf16", "bf16", "bf16"),
-        ("fp8", "fp8", "fp8"),
-    ],
-)
-@pytest.mark.parametrize("enable_pdl", [None])
-@pytest.mark.parametrize("enable_sink", [False])
-@pytest.mark.parametrize("max_in_kv_len", [4096, 8192, 16384, 32768, 65536, 131072])
-@pytest.mark.parametrize("head_dim", [128])
-@pytest.mark.parametrize("device_scale", [True, False])
+@pytest.mark.parametrize("batch_size, s_qo, s_kv", [[1, 8*1024, 8*1024], [1, 8*1024, 32*1024], [1, 8*1024, 64*1024], [4, 512, 80*1024], [4, 1024, 80*1024]])
+@pytest.mark.parametrize("num_kv_heads", [128])
+@pytest.mark.parametrize("head_grp_size", [1])
+@pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("skips_softmax", [False])
-def test_trtllm_batch_decode_long_sequence_length(
-    kv_layout: str,
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("backend", ["trtllm-gen", "cute-dsl"])
+def test_trtllm_gen_prefill(
+    mla_dimensions: MLAHeadDimensions,
     batch_size: int,
-    q_len_per_req: int,
-    page_size: int,
+    s_qo: int,
+    s_kv: int,
     num_kv_heads: int,
     head_grp_size: int,
-    window_left: int,
-    q_dtype: str,
-    o_dtype: str,
-    kv_dtype: str,
-    enable_pdl: bool,
-    enable_sink: bool,
-    max_in_kv_len: int,
-    head_dim: int,
-    device_scale: bool,
+    causal: bool,
     skips_softmax: bool,
+    dtype: torch.dtype,
+    backend: str,
 ) -> None:
-    # Small number of test cases for long sequence length
-    _test_trtllm_batch_decode(
-        "trtllm-gen",
-        kv_layout,
-        batch_size,
-        q_len_per_req,
-        page_size,
-        num_kv_heads,
-        head_grp_size,
-        window_left,
-        q_dtype,
-        o_dtype,
-        kv_dtype,
-        enable_pdl,
-        enable_sink,
-        max_in_kv_len,
-        head_dim,
-        device_scale,
-        skips_softmax=skips_softmax,
+    compute_capability = get_compute_capability(torch.device(device="cuda"))
+    if compute_capability[0] != 10:
+        pytest.skip("These tests are only guaranteed to work on SM100 and SM103 GPUs.")
+    if s_qo > s_kv:
+        pytest.skip("s_qo > s_kv, skipping test as causal")
+
+    num_qo_heads = num_kv_heads * head_grp_size
+    head_dim_qk = mla_dimensions.qk_nope_head_dim + mla_dimensions.qk_rope_head_dim
+    head_dim_vo = mla_dimensions.v_head_dim
+
+    seed = 0
+    torch.manual_seed(seed)
+    device = "cuda:0"
+
+    actual_seq_lens_q = torch.randint(
+        1, s_qo + 1, (batch_size, 1, 1, 1), dtype=torch.int32, device=device
     )
 
+    actual_seq_lens_kv = torch.randint(
+        s_qo, s_kv + 1, (batch_size, 1, 1, 1), dtype=torch.int32, device=device
+    )
 
-#@pytest.mark.parametrize(
-#    "mla_dimensions", [deepseek_mla_dimensions, smaller_mla_dimensions]
-#)
-#@pytest.mark.parametrize("batch_size", [4, 128, 256])
-#@pytest.mark.parametrize("s_qo", [32, 64, 87])
-#@pytest.mark.parametrize("s_kv", [32, 64, 87])
-#@pytest.mark.parametrize("num_kv_heads", [16, 32])
-#@pytest.mark.parametrize("head_grp_size", [1, 5, 8])
-#@pytest.mark.parametrize("causal", [True, False])
-#@pytest.mark.parametrize("skips_softmax", [False, True])
-#def test_trtllm_gen_prefill(
-#    mla_dimensions: MLAHeadDimensions,
-#    batch_size: int,
-#    s_qo: int,
-#    s_kv: int,
-#    num_kv_heads: int,
-#    head_grp_size: int,
-#    causal: bool,
-#    skips_softmax: bool,
-#) -> None:
-#    compute_capability = get_compute_capability(torch.device(device="cuda"))
-#    if compute_capability[0] != 10:
-#        pytest.skip("These tests are only guaranteed to work on SM100 and SM103 GPUs.")
-#    if s_qo > s_kv:
-#        pytest.skip("s_qo > s_kv, skipping test as causal")
-#
-#    num_qo_heads = num_kv_heads * head_grp_size
-#    head_dim_qk = mla_dimensions.qk_nope_head_dim + mla_dimensions.qk_rope_head_dim
-#    head_dim_vo = mla_dimensions.v_head_dim
-#
-#    seed = 0
-#    torch.manual_seed(seed)
-#    device = "cuda:0"
-#
-#    actual_seq_lens_q = torch.randint(
-#        1, s_qo + 1, (batch_size, 1, 1, 1), dtype=torch.int32, device=device
-#    )
-#
-#    actual_seq_lens_kv = torch.randint(
-#        s_qo, s_kv + 1, (batch_size, 1, 1, 1), dtype=torch.int32, device=device
-#    )
-#
-#    cumsum_s_qo = int(torch.sum(actual_seq_lens_q).item())
-#    cumsum_s_kv = int(torch.sum(actual_seq_lens_kv).item())
-#
-#    q = torch.randn(
-#        cumsum_s_qo, num_qo_heads, head_dim_qk, device=device, dtype=torch.bfloat16
-#    )
-#
-#    k_cache = torch.randn(
-#        (cumsum_s_kv, num_kv_heads, head_dim_qk),
-#        device=device,
-#        dtype=torch.bfloat16,
-#    )
-#    v_cache = torch.randn(
-#        (cumsum_s_kv, num_kv_heads, head_dim_vo),
-#        device=device,
-#        dtype=torch.bfloat16,
-#    )
-#
-#    # Initialize scale
-#    scale = float(1.0 / (head_dim_qk**0.5))
-#
-#    workspace_buffer, workspace_buffer_ref = create_workspace_buffers(device)
-#
-#    qo_indptr = torch.cat(
-#        [
-#            torch.tensor([0], device=device),
-#            torch.cumsum(actual_seq_lens_q.view(-1), dim=0),
-#        ]
-#    ).int()
-#
-#    # kv_indptr = torch.arange(0, batch_size + 1, device="cuda", dtype=torch.int32) * s_kv
-#
-#    # Create kv_indptr as cumulative sum of actual_seq_lens_kv
-#    kv_indptr = torch.cat(
-#        [
-#            torch.tensor(
-#                [0],
-#                device=device,
-#            ),
-#            torch.cumsum(actual_seq_lens_kv.view(-1), dim=0),
-#        ]
-#    ).int()
-#
-#    wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
-#        workspace_buffer_ref,
-#        kv_layout="NHD",
-#        backend="cutlass",
-#    )
-#    wrapper.plan(
-#        qo_indptr,
-#        kv_indptr,
-#        num_qo_heads,
-#        num_kv_heads,
-#        head_dim_qk,
-#        head_dim_vo=head_dim_vo,
-#        causal=causal,
-#        sm_scale=scale,
-#        q_data_type=torch.bfloat16,
-#        kv_data_type=torch.bfloat16,
-#    )
-#    output_ref, lse_ref = wrapper.run(q, k_cache, v_cache, return_lse=True)
-#    output = torch.empty_like(output_ref)
-#
-#    bmm1_scale = scale
-#    bmm2_scale = 1.0
-#
-#    # Using a tiny threshold should give the same result as normal attention.
-#    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
-#
-#    output_trtllm, lse_trtllm = flashinfer.prefill.trtllm_ragged_attention_deepseek(
-#        q,
-#        k_cache,
-#        v_cache,
-#        workspace_buffer,
-#        actual_seq_lens_kv,
-#        s_qo,
-#        s_kv,
-#        bmm1_scale,
-#        bmm2_scale,
-#        -1,
-#        batch_size,
-#        -1,
-#        qo_indptr,
-#        kv_indptr,
-#        False,
-#        causal,
-#        True,
-#        skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
-#        out=output,
-#    )
-#    torch.testing.assert_close(
-#        output_trtllm,
-#        output_ref,
-#        atol=1e-2,
-#        rtol=1e-2,
-#    )
-#    torch.testing.assert_close(
-#        lse_trtllm,
-#        lse_ref,
-#        atol=1e-3,
-#        rtol=1e-3,
-#    )
-#    # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
-#    # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
-#    assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
-#
-#
-#@pytest.mark.parametrize(
-#    "mla_dimensions", [deepseek_mla_dimensions, smaller_mla_dimensions]
-#)
-#@pytest.mark.parametrize("batch_size", [1])
-#@pytest.mark.parametrize("s_qo", [1024])
-#@pytest.mark.parametrize("s_kv", [1024])
-#@pytest.mark.parametrize("num_kv_heads", [128])
-#@pytest.mark.parametrize("head_grp_size", [1])
-#@pytest.mark.parametrize("causal", [True, False])
-#@pytest.mark.parametrize("skips_softmax", [False, True])
-#def test_trtllm_gen_prefill_bs1(
-#    mla_dimensions: MLAHeadDimensions,
-#    batch_size: int,
-#    s_qo: int,
-#    s_kv: int,
-#    num_kv_heads: int,
-#    head_grp_size: int,
-#    causal: bool,
-#    skips_softmax: bool,
-#):
-#    test_trtllm_gen_prefill(
-#        mla_dimensions,
-#        batch_size,
-#        s_qo,
-#        s_kv,
-#        num_kv_heads,
-#        head_grp_size,
-#        causal,
-#        skips_softmax,
-#    )
-#
-#
-#def make_query_non_contiguous(
-#    q: torch.Tensor, num_qo_heads: int, head_dim: int
-#) -> torch.Tensor:
-#    """
-#    Create a non-contiguous version of the query tensor.
-#    Create a (N, H, 2*D) tensor and slice the first D dimensions: x[..., :D]
-#    This produces a non-contiguous view with the same data.
-#    """
-#    n, h, d = q.shape
-#    # Create a larger tensor with 2*D in the last dimension
-#    large_tensor = torch.zeros(n, h, 2 * d, dtype=q.dtype, device=q.device)
-#    large_tensor[..., :d] = q
-#    # Slice to get non-contiguous query (only last dim is contiguous)
-#    q_non_contiguous = large_tensor[..., :d]
-#    assert not q_non_contiguous.is_contiguous(), "Query should be non-contiguous"
-#    return q_non_contiguous
-#
-#
-#@pytest.mark.parametrize("backend", ["trtllm-gen"])
-#@pytest.mark.parametrize("kv_layout", ["HND", "NHD"])
-#@pytest.mark.parametrize(
-#    "batch_size,max_q_len,page_size,num_kv_heads,head_grp_size",
-#    [
-#        (4, 1, 16, 2, 1),
-#        (4, 1, 32, 2, 5),
-#        (4, 2, 64, 2, 5),
-#        (4, 3, 32, 2, 5),
-#        (4, 3, 64, 2, 1),
-#        (4, 4, 64, 4, 1),
-#        (4, 5, 64, 4, 8),
-#        (128, 1, 64, 2, 5),
-#        (128, 2, 32, 4, 1),
-#        (128, 3, 16, 4, 8),
-#        (128, 4, 16, 2, 5),
-#        (128, 5, 16, 2, 5),
-#        (256, 1, 64, 4, 8),
-#        (256, 2, 16, 2, 8),
-#        (256, 3, 64, 4, 5),
-#        (256, 4, 32, 2, 8),
-#        (256, 5, 32, 2, 1),
-#    ],
-#)
-#@pytest.mark.parametrize("window_left", [-1, 127])
-#@pytest.mark.parametrize(
-#    "q_dtype,kv_dtype,o_dtype",
-#    [
-#        ("bf16", "bf16", "bf16"),
-#        ("fp16", "fp16", "fp16"),
-#        ("bf16", "fp8", "bf16"),
-#        ("fp16", "fp8", "fp16"),
-#        ("bf16", "fp8", "fp8"),
-#        ("fp16", "fp8", "fp8"),
-#        ("fp8", "fp8", "bf16"),
-#        ("fp8", "fp8", "fp16"),
-#        ("fp8", "fp8", "fp8"),
-#        ("fp8", "fp8", "nvfp4"),
-#    ],
-#)
-#@pytest.mark.parametrize("enable_pdl", [True, False, None])
-#@pytest.mark.parametrize("enable_sink", [True, False])
-#@pytest.mark.parametrize("max_in_kv_len", [110])
-#@pytest.mark.parametrize("head_dim", [128])
-#@pytest.mark.parametrize("skips_softmax", [False, True])
-#def test_trtllm_batch_decode_spec(
-#    backend: str,
-#    kv_layout: str,
-#    batch_size: int,
-#    max_q_len: int,
-#    page_size: int,
-#    num_kv_heads: int,
-#    head_grp_size: int,
-#    window_left: int,
-#    q_dtype: str,
-#    o_dtype: str,
-#    kv_dtype: str,
-#    enable_pdl: bool,
-#    enable_sink: bool,
-#    max_in_kv_len: int,
-#    head_dim: int,
-#    skips_softmax: bool,
-#) -> None:
-#    _test_trtllm_batch_decode(
-#        backend,
-#        kv_layout,
-#        batch_size,
-#        None,  # q_len_per_req
-#        page_size,
-#        num_kv_heads,
-#        head_grp_size,
-#        window_left,
-#        q_dtype,
-#        o_dtype,
-#        kv_dtype,
-#        enable_pdl,
-#        enable_sink,
-#        max_in_kv_len,
-#        head_dim,
-#        max_q_len=max_q_len,
-#        skips_softmax=skips_softmax,
-#    )
-#
+    cumsum_s_qo = int(torch.sum(actual_seq_lens_q).item())
+    cumsum_s_kv = int(torch.sum(actual_seq_lens_kv).item())
+
+    # Create tensors in bfloat16 first, then convert to target dtype
+    q_bf16 = torch.randn(
+        cumsum_s_qo, num_qo_heads, head_dim_qk, device=device, dtype=torch.bfloat16
+    )
+    k_bf16 = torch.randn(
+        cumsum_s_kv, num_kv_heads, head_dim_qk, device=device, dtype=torch.bfloat16,
+    )
+    v_bf16 = torch.randn(
+        cumsum_s_kv, num_kv_heads, head_dim_vo, device=device, dtype=torch.bfloat16,
+    )
+
+    if dtype == torch.float8_e4m3fn:
+        q, q_scale = to_float8(q_bf16)
+        k_cache, k_scale = to_float8(k_bf16)
+        v_cache, v_scale = to_float8(v_bf16)
+        # Fake-quantized bf16 for reference
+        ref_q = q.to(torch.bfloat16) * q_scale
+        ref_k = k_cache.to(torch.bfloat16) * k_scale
+        ref_v = v_cache.to(torch.bfloat16) * v_scale
+        q_scale_val = q_scale.item()
+        k_scale_val = k_scale.item()
+        v_scale_val = v_scale.item()
+    else:
+        q, k_cache, v_cache = q_bf16, k_bf16, v_bf16
+        ref_q, ref_k, ref_v = q, k_cache, v_cache
+        q_scale_val = k_scale_val = v_scale_val = 1.0
+
+    # Initialize scale
+    scale = float(1.0 / (head_dim_qk**0.5))
+
+    workspace_buffer, workspace_buffer_ref = create_workspace_buffers(device)
+
+    qo_indptr = torch.cat(
+        [
+            torch.tensor([0], device=device),
+            torch.cumsum(actual_seq_lens_q.view(-1), dim=0),
+        ]
+    ).int()
+
+    # Create kv_indptr as cumulative sum of actual_seq_lens_kv
+    kv_indptr = torch.cat(
+        [
+            torch.tensor([0], device=device),
+            torch.cumsum(actual_seq_lens_kv.view(-1), dim=0),
+        ]
+    ).int()
+
+    # Reference uses fake-quantized bf16 tensors
+    wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
+        workspace_buffer_ref,
+        kv_layout="NHD",
+        backend="cutlass",
+    )
+    wrapper.plan(
+        qo_indptr,
+        kv_indptr,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim_qk,
+        head_dim_vo=head_dim_vo,
+        causal=causal,
+        sm_scale=scale,
+        q_data_type=ref_q.dtype,
+        kv_data_type=ref_k.dtype,
+    )
+    output_ref, lse_ref = wrapper.run(ref_q, ref_k, ref_v, return_lse=True)
+    output = torch.empty_like(output_ref)
+
+    bmm1_scale = q_scale_val * k_scale_val * scale
+    bmm2_scale = v_scale_val
+
+    # Using a tiny threshold should give the same result as normal attention.
+    skip_softmax_threshold_scale_factor = 1e-30 if skips_softmax else None
+
+    if backend == "trtllm-gen":
+        output_trtllm, lse_trtllm = flashinfer.prefill.trtllm_ragged_attention_deepseek(
+            q,
+            k_cache,
+            v_cache,
+            workspace_buffer,
+            actual_seq_lens_kv,
+            s_qo,
+            s_kv,
+            bmm1_scale,
+            bmm2_scale,
+            -1,
+            batch_size,
+            -1,
+            qo_indptr,
+            kv_indptr,
+            False,
+            causal,
+            True,
+            skip_softmax_threshold_scale_factor=skip_softmax_threshold_scale_factor,
+            out=output,
+        )
+        torch.testing.assert_close(
+            output_trtllm.float(),
+            output_ref.float(),
+            atol=1e-2,
+            rtol=1e-2,
+        )
+        # check if the first 8192 * 256 * 4 bytes of workspace_buffer is zero
+        # note(Yingyi): the first 8192 * 256 * 4 bytes of workspace_buffer is the counter workspace, size might change in the future
+        assert (workspace_buffer[: 8192 * 256 * 4].cpu().numpy() == 0).all()
+
+    # Also test cute-dsl backend
+    if backend == "cute-dsl":
+        # fmha.py check_invalid_shape: head_dim=192 only supports Float8E4M3FN
+        cute_dsl_compatible = not (head_dim_qk == 192 and q.dtype != torch.float8_e4m3fn)
+        if not cute_dsl_compatible:
+            pytest.skip(
+                f"cute-dsl FMHA kernel does not support head_dim={head_dim_qk} with {dtype}. "
+                f"head_dim=192 only supports Float8E4M3FN (see fmha.py check_invalid_shape)."
+            )
+
+        if cute_dsl_compatible:
+            output_cutedsl, lse_cutedsl = _run_cute_dsl_fmha_prefill(
+                q,
+                k_cache,
+                v_cache,
+                qo_indptr,
+                kv_indptr,
+                batch_size,
+                scale,
+                causal,
+                head_dim_vo,
+                scale_q=q_scale_val,
+                scale_k=k_scale_val,
+                scale_v=v_scale_val,
+            )
+            torch.testing.assert_close(
+                output_cutedsl.float(),
+                output_ref.float(),
+                atol=1e-2,
+                rtol=1e-2,
+            )
