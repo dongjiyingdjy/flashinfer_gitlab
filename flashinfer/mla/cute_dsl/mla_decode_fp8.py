@@ -178,6 +178,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         is_var_seq: bool,
         is_var_split_kv: bool,
         fold_sq: bool = False,
+        is_causal: bool = False,
+        num_heads: int = 128,
+        seq_len_q: int = 1,
     ):
         """Initializes the configuration for a Blackwell Multi-Head Latent Attention (MLA) kernel.
 
@@ -216,6 +219,12 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         self.is_var_seq = is_var_seq
         self.is_var_split_kv = is_var_split_kv
         self.fold_sq = fold_sq
+        self.is_causal = is_causal
+        # Original (pre-fold) num_heads and seq_len_q used for per-row causal
+        # q_token_index computation. When fold_sq is True, the M tile is laid
+        # out as [S_q * H] with row r → (q_tok = r // num_heads, head = r % num_heads).
+        self.num_heads = num_heads
+        self.seq_len_q = seq_len_q
         self.cluster_shape_mnk = (2, 1, 1)
         self.use_2cta_instrs = True
         # When using 2 CTAs with m=128: warps 0-1 handle accumulation for first half [0, n/2),
@@ -2368,7 +2377,11 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         correction_factor = self.acc_dtype(1)
         common_params.p_cor_pipeline.producer_acquire(p_cor_producer_state)
 
-        # no mask applied
+        # Non-last tiles skip masking. This is correct for causal whenever the
+        # last-tile residual (K - (k_tile_total-1) * mma_qk_tiler[1]) is >=
+        # seq_len_q, so the min k_bound = K - seq_len_q + 1 still falls inside
+        # the last tile. Page-aligned K with page_size >= seq_len_q guarantees
+        # this (e.g., page_size=64, seq_len_q<=4, tile_N=128 always works).
         while k_tile_count > 1:
             (
                 mma_s_consumer_state,
@@ -2641,6 +2654,17 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         tTR_rAcc = cute.make_fragment_like(tTR_tS, self.acc_dtype)
 
         row_max_new = row_max
+        # Causal mask: emulate single-token-per-CTA causal masking for
+        # spec-decoding / MTP generation. Each row represents one (q_token, head)
+        # pair; row r's effective K bound is K - (S_q - 1 - q_tok(r)).
+        #   fold_sq=True : q_tok(r) = r_global // num_heads (M laid out as [S_q, H])
+        #   fold_sq=False: q_tok(r) = blk_coord[1] (single q token per work tile)
+        # r_global = row_in_cta + cluster_idx * (M_tile / cluster_m)
+        # Masked positions are filled with a large negative sentinel (not -inf).
+        # With -inf, rows that become entirely masked in a tile produce NaN in
+        # the final output via the FMA/exp2 path on sm_100; -1e6 underflows
+        # exp2(x * scale) to 0 in fp32 while avoiding -inf propagation.
+        cta_m_rows = self.mma_qk_tiler[0] // self.cluster_shape_mnk[0]
         arch = BaseDSL._get_dsl().get_arch_enum()
         if cutlass.const_expr(arch >= Arch.sm_100 and arch <= Arch.sm_100f):
             cute.copy(tmem_tiled_copy, tTR_tAcc, tTR_rAcc)
@@ -2652,13 +2676,24 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             mma_s_consumer_state.advance()
             for i in cutlass.range_constexpr(cute.size(tTR_rAcc)):
                 if is_last_tile:
+                    if cutlass.const_expr(self.is_causal):
+                        if cutlass.const_expr(self.fold_sq):
+                            q_tok = (
+                                tTR_tS[i][0]
+                                + common_params.blk_coord[0] * cta_m_rows
+                            ) // self.num_heads
+                        else:
+                            q_tok = common_params.blk_coord[1]
+                        k_bound = common_params.K - (self.seq_len_q - 1) + q_tok
+                    else:
+                        k_bound = common_params.K
                     tTR_rAcc[i] = (
                         tTR_rAcc[i]
                         if cute.elem_less(
                             tTR_tS[i][1] + self.mma_qk_tiler[1] * k_index,
-                            common_params.K,
+                            k_bound,
                         )
-                        else -self.acc_dtype.inf
+                        else self.acc_dtype(-1.0e6)
                     )
             # reduction for row_max
             row_max_new = tTR_rAcc.load().reduce(cute.ReductionOp.MAX, row_max_new, 0)
@@ -2690,19 +2725,39 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             tTR_rAcc = cute.make_tensor(tTR_rAcc_red.iterator, tTR_rAcc.layout)
             if is_last_tile:
                 for i in cutlass.range_constexpr(cute.size(tTR_rAcc)):
+                    if cutlass.const_expr(self.is_causal):
+                        if cutlass.const_expr(self.fold_sq):
+                            q_tok = (
+                                tTR_tS[i][0]
+                                + common_params.blk_coord[0] * cta_m_rows
+                            ) // self.num_heads
+                        else:
+                            q_tok = common_params.blk_coord[1]
+                        # effective K(row) = K - (S_q - 1) + q_tok; equivalent to
+                        # K - (S_q - 1 - q_tok), written to avoid Python int/CuTe
+                        # Int32 __rsub__ quirks when self.seq_len_q==1.
+                        k_bound = common_params.K - (self.seq_len_q - 1) + q_tok
+                    else:
+                        k_bound = common_params.K
                     tTR_rAcc[i] = (
                         tTR_rAcc[i]
                         if cute.elem_less(
                             tTR_tS[i][1] + self.mma_qk_tiler[1] * k_index,
-                            common_params.K,
+                            k_bound,
                         )
-                        else -self.acc_dtype.inf
+                        else self.acc_dtype(-1.0e6)
                     )
                 # reduction for row_max
                 row_max_new = tTR_rAcc.load().reduce(
                     cute.ReductionOp.MAX, row_max_new, 0
                 )
             else:
+                # sm_103 pre-computed max via reduction; under causal with
+                # seq_len_q > 1 the pre-computed max for the last tile may
+                # include rows whose effective K < full K. Fall back to the
+                # normal (non-reduced) path by re-loading when is_last_tile,
+                # so this branch only runs for non-last tiles where causal
+                # masking does not apply.
                 row_max_new = cute.arch.fmax(row_max_new, tTR_rMax[0])
 
         # if warps in N is 2, reduce row_max across warps (0, 1) and (2, 3)
@@ -3440,8 +3495,8 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         o_shape = o.shape
         tile_sched_params = create_mla_static_tile_scheduler_params(
             is_persistent,
-            cute.size(o_shape[3]),
-            cute.size(o_shape[2]),
+            cute.size(o_shape[3]), # batch
+            cute.size(o_shape[2]), # S_q or 1 for fold_sq
             cluster_shape_mnk,
             split_kv,
         )
@@ -3654,6 +3709,7 @@ def run(
     iterations: int,
     skip_ref_check: bool,
     use_cold_l2: bool,
+    is_causal: bool = False,
     **kwargs,
 ):
     """Execute Multi-Head Latent Attention (MLA) on Blackwell architecture and validate results.
@@ -3743,6 +3799,7 @@ def run(
     print(f"  iterations: {iterations}")
     print(f"  skip_ref_check: {skip_ref_check}")
     print(f"  use_cold_l2: {use_cold_l2}")
+    print(f"  is_causal: {is_causal}")
 
     import torch
     import cutlass.torch as cutlass_torch
@@ -4042,6 +4099,9 @@ def run(
         is_var_seq,
         is_var_split_kv,
         fold_sq=fold_sq,
+        is_causal=is_causal,
+        num_heads=num_heads,
+        seq_len_q=seq_len_q,
     )
 
     # Get current CUDA stream from PyTorch
@@ -4109,16 +4169,43 @@ def run(
             v_ref[b, :, cache_seqs_ref[b] :, :] = 0
         import torch.nn.functional as F
 
+        # Build spec-decoding causal mask: for Q token qi ∈ [0, S_q) and batch b,
+        # valid KV positions are [0, cache_seqs_ref[b] - S_q + 1 + qi). The
+        # sdpa call below treats q_ref=[B, S_q, H, D_total] as batch=B, group=S_q,
+        # query-seq=H, dim=D_total, so the mask is indexed by the group (S_q)
+        # dim and broadcasts over the query-seq (H) dim.
+        attn_mask = None
+        if is_causal:
+            S_q_actual = q_ref.shape[1]
+            max_K_len = k_ref.shape[2]
+            attn_mask = torch.zeros(
+                batch_size, S_q_actual, 1, max_K_len, dtype=torch.bool
+            )
+            for b in range(batch_size):
+                Kb = int(cache_seqs_ref[b])
+                for qi in range(S_q_actual):
+                    upper = max(0, Kb - S_q_actual + 1 + qi)
+                    attn_mask[b, qi, 0, :upper] = True
+            attn_mask_sdpa = (
+                attn_mask.to(q_ref.device) if q_ref.is_cuda else attn_mask
+            )
+        else:
+            attn_mask_sdpa = None
+
         o_ref = F.scaled_dot_product_attention(
             q_ref,
             k_ref,
             v_ref,
-            attn_mask=None,
+            attn_mask=attn_mask_sdpa,
             dropout_p=0.0,
             scale=softmax_scale,
             is_causal=False,
         )
         s_ref = torch.einsum("bhld,bhsd->bhls", q_ref, k_ref)
+        if is_causal:
+            s_ref = s_ref.masked_fill(
+                ~attn_mask.to(s_ref.device).expand_as(s_ref), float("-inf")
+            )
         s_ref_max, s_ref_max_pos = torch.max(s_ref, dim=-1, keepdim=True)
         softmax_scale_log2 = LOG2_E * softmax_scale
         s_ref_sum = torch.sum(
@@ -4516,6 +4603,12 @@ if __name__ == "__main__":
         help="Use cold L2 cache",
     )
 
+    parser.add_argument(
+        "--is_causal",
+        action="store_true",
+        help="Apply spec-decoding causal mask: Q token qi sees KV [0, K - S_q + 1 + qi)",
+    )
+
     args = parser.parse_args()
 
     run(
@@ -4544,6 +4637,7 @@ if __name__ == "__main__":
         args.iterations,
         args.skip_ref_check,
         args.use_cold_l2,
+        is_causal=args.is_causal,
     )
 
     print("PASS")
