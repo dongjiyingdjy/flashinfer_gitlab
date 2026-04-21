@@ -116,6 +116,9 @@ def _get_compiled_mla_kernel(
     skip_correction_threshold: float = 0.0,
     is_workspace_size_zero: bool = False,
     fold_sq: bool = False,
+    causal_mask: bool = True,
+    num_heads: int = 128,
+    seq_len_q: int = 1,
 ) -> Callable:
     """Compile and cache an MLA decode kernel.
 
@@ -155,8 +158,12 @@ def _get_compiled_mla_kernel(
         is_var_seq=is_var_seq,
         is_var_split_kv=is_var_split_kv,
     )
-    if is_fp8 and fold_sq:
-        kernel_kwargs["fold_sq"] = True
+    if is_fp8:
+        kernel_kwargs["is_causal"] = causal_mask
+        kernel_kwargs["num_heads"] = num_heads
+        kernel_kwargs["seq_len_q"] = seq_len_q
+        if fold_sq:
+            kernel_kwargs["fold_sq"] = True
     kernel_obj = KernelClass(**kernel_kwargs)
 
     # All dimensions as sym_int — this matches the original kernel's use of
@@ -287,6 +294,7 @@ def cute_dsl_mla_decode(
     output_scale: float = 1.0,
     out: Optional[torch.Tensor] = None,
     is_var_seq: bool = True,
+    causal_mask: bool = True,
 ) -> torch.Tensor:
     """CuTe DSL MLA decode kernel for Blackwell SM100.
 
@@ -324,6 +332,9 @@ def cute_dsl_mla_decode(
         Whether the sequence length is variable.
         If True, the sequence length is variable.
         Otherwise,the sequence length is fixed for all the requests in the batch.
+    causal_mask : bool
+        Whether to enable causal masking in the CuTe DSL kernel.
+        Currently this is effective for the FP8 kernel path.
 
     Returns
     -------
@@ -444,6 +455,9 @@ def cute_dsl_mla_decode(
         skip_correction_threshold=skip_correction_threshold,
         is_workspace_size_zero=is_workspace_size_zero,
         fold_sq=fold_sq,
+        causal_mask=causal_mask,
+        num_heads=H,
+        seq_len_q=q_len,
     )
 
     # Call the kernel

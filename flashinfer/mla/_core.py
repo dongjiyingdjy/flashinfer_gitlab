@@ -610,6 +610,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
     enable_pdl: bool | None = None,
     backend: str = "auto",
     is_var_seq: bool = True,
+    causal_mask: bool = True,
 ) -> torch.Tensor:
     """
     Parameters
@@ -646,6 +647,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
         Whether the sequence length is variable.
         If True, the sequence length is variable.
         Otherwise,the sequence length is fixed for all the requests in the batch.
+    causal_mask : bool
+        Whether to apply causal mask in the ``cute-dsl`` backend.
+        Defaults to ``True``.
 
     Note
     ----
@@ -829,6 +833,7 @@ def trtllm_batch_decode_with_kv_cache_mla(
             output_scale=bmm2_scale,
             out=out,
             is_var_seq=is_var_seq,
+            causal_mask=causal_mask,
         )
     else:
         raise ValueError(f"Backend {backend} not supported")

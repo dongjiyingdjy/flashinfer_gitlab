@@ -433,7 +433,7 @@ def trtllm_batch_decode_mla(
         layer_dimensions.head_dimensions.kv_lora_rank,
         layer_dimensions.head_dimensions.qk_rope_head_dim,
         page_size,
-        True,
+        True, # is_causal
         sm_scale,
         query.dtype,
         kv_cache.dtype,
