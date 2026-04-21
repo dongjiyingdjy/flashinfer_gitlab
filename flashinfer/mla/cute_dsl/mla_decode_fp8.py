@@ -2377,12 +2377,23 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         correction_factor = self.acc_dtype(1)
         common_params.p_cor_pipeline.producer_acquire(p_cor_producer_state)
 
-        # Non-last tiles skip masking. This is correct for causal whenever the
-        # last-tile residual (K - (k_tile_total-1) * mma_qk_tiler[1]) is >=
-        # seq_len_q, so the min k_bound = K - seq_len_q + 1 still falls inside
-        # the last tile. Page-aligned K with page_size >= seq_len_q guarantees
-        # this (e.g., page_size=64, seq_len_q<=4, tile_N=128 always works).
-        while k_tile_count > 1:
+        # Number of tiles from the global-K end that may contain causal-masked
+        # positions. For causal, min k_bound = K - (S_q-1), which can span up
+        # to ceil((S_q-1)/tile_N)+1 tiles (tile-boundary-crossing case).
+        # Non-causal only needs the final K-bound tile.
+        tile_n = self.mma_qk_tiler[1]
+        if cutlass.const_expr(self.is_causal):
+            mask_tile_count = (self.seq_len_q - 1 + tile_n - 1) // tile_n + 1
+        else:
+            mask_tile_count = 1
+
+        # first_mask_tile_idx is the global index of the first tile that may
+        # need masking. Runtime because it depends on K (per-batch in
+        # var-seq / split-KV).
+        first_mask_tile_idx = k_tile_total - mask_tile_count
+
+        # Phase 1: pure unmasked bulk tiles (all columns strictly < min k_bound).
+        while k_tile_count > 1 and k_index < first_mask_tile_idx:
             (
                 mma_s_consumer_state,
                 p_mma_producer_state,
@@ -2406,8 +2417,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             k_index = k_index + 1
             k_tile_count = k_tile_count - 1
 
-        # mask applied
-        if cutlass.const_expr(common_params.mAccO is not None):
+        # Phase 2: intermediate tiles that overlap the causal/K-bound region
+        # but are not this work-split's final tile.
+        while k_tile_count > 1:
             (
                 mma_s_consumer_state,
                 p_mma_producer_state,
@@ -2425,7 +2437,35 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 row_max,
                 row_sum,
                 correction_factor,
-                k_index == k_tile_total - 1,
+                True,
+                False,
+            )
+            k_index = k_index + 1
+            k_tile_count = k_tile_count - 1
+
+        # Phase 3: this work-split's final tile.
+        if cutlass.const_expr(common_params.mAccO is not None):
+            # Split-KV: only apply mask when this final tile is globally in
+            # the mask region (covers both last-split last-tile and straddling
+            # splits). Runtime comparison.
+            (
+                mma_s_consumer_state,
+                p_mma_producer_state,
+                p_cor_producer_state,
+                row_max,
+                row_sum,
+                correction_factor,
+            ) = self.softmax(
+                common_params,
+                softmax_params,
+                k_index,
+                mma_s_consumer_state,
+                p_mma_producer_state,
+                p_cor_producer_state,
+                row_max,
+                row_sum,
+                correction_factor,
+                k_index >= first_mask_tile_idx,
                 True,
             )
         else:
@@ -2575,7 +2615,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         row_max: cutlass.Float32,
         row_sum: cutlass.Float32,
         correction_factor: cutlass.Float32,
-        is_last_tile: bool,
+        apply_mask: bool,
         is_local_last_tile: cutlass.Boolean,
     ) -> tuple[
         pipeline.PipelineState,
@@ -2605,8 +2645,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :type row_sum: cutlass.Float32
         :param correction_factor: The correction factor
         :type correction_factor: cutlass.Float32
-        :param is_last_tile: Whether the last tile
-        :type is_last_tile: bool
+        :param apply_mask: Whether the tile needs K-bound / causal masking (Python bool
+            for the unmasked/masked bulk loops; runtime cutlass.Boolean for the
+            split-KV final iter where mask only applies on the global last tile).
+        :type apply_mask: bool | cutlass.Boolean
         :param is_local_last_tile: Whether the last tile is local
         :type is_local_last_tile: cutlass.Boolean
 
@@ -2675,7 +2717,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             softmax_params.mma_s_pipeline.consumer_release(mma_s_consumer_state)
             mma_s_consumer_state.advance()
             for i in cutlass.range_constexpr(cute.size(tTR_rAcc)):
-                if is_last_tile:
+                if apply_mask:
                     if cutlass.const_expr(self.is_causal):
                         if cutlass.const_expr(self.fold_sq):
                             q_tok = (
@@ -2723,7 +2765,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             softmax_params.mma_s_pipeline.consumer_release(mma_s_consumer_state)
             mma_s_consumer_state.advance()
             tTR_rAcc = cute.make_tensor(tTR_rAcc_red.iterator, tTR_rAcc.layout)
-            if is_last_tile:
+            if apply_mask:
                 for i in cutlass.range_constexpr(cute.size(tTR_rAcc)):
                     if cutlass.const_expr(self.is_causal):
                         if cutlass.const_expr(self.fold_sq):
@@ -2747,17 +2789,13 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                         )
                         else self.acc_dtype(-1.0e6)
                     )
-                # reduction for row_max
+                # reduction for row_max after manual masking
                 row_max_new = tTR_rAcc.load().reduce(
                     cute.ReductionOp.MAX, row_max_new, 0
                 )
             else:
-                # sm_103 pre-computed max via reduction; under causal with
-                # seq_len_q > 1 the pre-computed max for the last tile may
-                # include rows whose effective K < full K. Fall back to the
-                # normal (non-reduced) path by re-loading when is_last_tile,
-                # so this branch only runs for non-last tiles where causal
-                # masking does not apply.
+                # sm_103 pre-computed max via reduction is valid here because
+                # tTR_rAcc is unmodified (no mask applied to this tile).
                 row_max_new = cute.arch.fmax(row_max_new, tTR_rMax[0])
 
         # if warps in N is 2, reduce row_max across warps (0, 1) and (2, 3)
@@ -3676,7 +3714,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         # H*S can be < M tile (padding with zeros via TMA OOB); it just can't exceed it
         if H < mma_qk_tiler_mn[0] and H * S > mma_qk_tiler_mn[0]:
             return False
-        if S <= 0 or S > 4:
+        if S <= 0:
             return False
         if K <= 0:
             return False
