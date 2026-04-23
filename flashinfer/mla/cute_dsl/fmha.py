@@ -630,6 +630,7 @@ class BlackwellFusedMultiHeadAttentionForward:
             cluster=self.cluster_shape_mnk,
             stream=stream,
             min_blocks_per_mp=1,
+            use_pdl=True,
         )
 
     #  GPU device kernel
@@ -928,6 +929,9 @@ class BlackwellFusedMultiHeadAttentionForward:
         # ///////////////////////////////////////////////////////////////////////////////
         if warp_idx == self.load_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_other)
+            # PDL: wait for the prior kernel (e.g. QKV projection) to finish
+            # its writes before issuing TMA loads that read Q/K/V from GMEM.
+            cute.arch.griddepcontrol_wait()
             while work_tile.is_valid_tile:
                 curr_block_coord = work_tile.tile_idx
                 batch_coord = curr_block_coord[2][1]
@@ -1482,6 +1486,10 @@ class BlackwellFusedMultiHeadAttentionForward:
                 # Advance to next tile
                 tile_sched.advance_to_next_work()
                 work_tile = tile_sched.get_current_work()
+
+            # PDL: hint the runtime that dependent kernels can be early-launched.
+            # Placed after barrier init; per-warp work (TMA load, MMA) starts below.
+            cute.arch.griddepcontrol_launch_dependents()
             # End of persistent scheduler loop
             tmem.relinquish_alloc_permit()
             # Synchronize before TMEM dealloc (done by the caller)

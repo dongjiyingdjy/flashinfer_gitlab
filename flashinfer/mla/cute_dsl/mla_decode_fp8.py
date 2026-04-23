@@ -831,6 +831,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
             smem=SplitKVKernelSharedStorage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,
             min_blocks_per_mp=1,
+            use_pdl=True,
         )
         if cutlass.const_expr(acc_o is not None):
             self.reduction_kernel(
@@ -847,6 +848,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
                 smem=MAX_SPLITS * self.acc_dtype.width // 8,
                 stream=stream,
                 min_blocks_per_mp=1,
+                use_pdl=True,
             )
 
     @cute.jit
@@ -1124,6 +1126,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
 
         if warp_idx == self.load_tma_k_warp_id:
             _setmaxregister_decrease(self.other_reg_num)
+            # PDL: wait for the prior kernel to finish its writes before
+            # issuing TMA loads for K (latent + rope) from GMEM.
+            cute.arch.griddepcontrol_wait()
             load_k_producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, self.load_k_stage
             )
@@ -1170,6 +1175,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
 
         if warp_idx == self.load_tma_v_warp_id:
             _setmaxregister_decrease(self.other_reg_num)
+            # PDL: wait for the prior kernel to finish its writes before
+            # issuing TMA loads for Q and V from GMEM.
+            cute.arch.griddepcontrol_wait()
             load_q_producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, self.load_q_stage
             )
@@ -1326,6 +1334,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
 
             mma_s_pipeline.producer_tail(mma_s_producer_state)
             mma_o_pipeline.producer_tail(mma_o_producer_state)
+
+            # Allow any subsequent dependent kernel to be early-launched.
+            cute.arch.griddepcontrol_launch_dependents()
 
             tmem.relinquish_alloc_permit()
             tmem.free(tmem_ptr)
@@ -1506,6 +1517,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         lse_scale_ptr = cute.recast_ptr(storage, dtype=self.acc_dtype)
         smem_lse_scale = cute.make_tensor(lse_scale_ptr, cute.make_layout(MAX_SPLITS))
 
+        # PDL: wait for the split-KV kernel to finish writing mAccO / mAccLSE
+        # before reading them in this reduction kernel.
+        cute.arch.griddepcontrol_wait()
+
         gLSE = mAccLSE[blk_coord[0], None, blk_coord[1], blk_coord[2]]
         warp_idx = cute.arch.make_warp_uniform(cute.arch.warp_idx())
         if warp_idx == 0:
@@ -1569,6 +1584,9 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         for j in cutlass.range_constexpr(elements_per_thread):
             element_idx = tidx + j * self.threads_per_warp * self.num_compute_warps
             mO[blk_coord[0], element_idx, blk_coord[1], blk_coord[2]] = rO[j]
+
+        # Allow any subsequent dependent kernel to be early-launched.
+        cute.arch.griddepcontrol_launch_dependents()
         return
 
     @staticmethod
