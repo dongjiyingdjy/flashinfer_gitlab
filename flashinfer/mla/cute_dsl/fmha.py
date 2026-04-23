@@ -2099,12 +2099,13 @@ class BlackwellFusedMultiHeadAttentionForward:
             )
             inplace_peek_status = inplace_consumer.try_wait()
             inplace_consumer.wait_and_advance(inplace_peek_status)
+
+            pi_handle = pi_mma_producer.acquire_and_advance()
             # store P
             cute.copy(tiled_tmem_store, tTMEM_STORErS_x4, tTMEM_STOREtS_x4)
             cute.arch.fence_view_async_tmem_store()
             # Notify tensor core warp that softmax(S->P) is ready
-            pi_mma_producer.commit()
-            pi_mma_producer.advance()
+            pi_handle.commit()
             row_sum = self.compute_row_sum(
                 tTMEM_LOADrS, scale_softmax_log2, old_row_max, row_max_safe, row_sum
             )
