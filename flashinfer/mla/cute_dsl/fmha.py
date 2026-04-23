@@ -938,6 +938,7 @@ class BlackwellFusedMultiHeadAttentionForward:
                 continue_cond = False
                 cuseqlen_q = Int32(0)
                 seqlen_q = mQ_qdl.shape[0]
+                seqlen_k = mK_kdl.shape[0]
                 if cutlass.const_expr(cum_seqlen_q is not None):
                     cuseqlen_q = cum_seqlen_q[batch_coord]
                     seqlen_q = cum_seqlen_q[batch_coord + 1] - cuseqlen_q
@@ -947,11 +948,12 @@ class BlackwellFusedMultiHeadAttentionForward:
                         seqlen_q,
                     )
                 if not continue_cond:
-                    seqlen_k = mK_kdl.shape[0]
                     if cutlass.const_expr(cum_seqlen_k is not None):
                         seqlen_k = (
                             cum_seqlen_k[batch_coord + 1] - cum_seqlen_k[batch_coord]
                         )
+                    continue_cond = seqlen_k <= 0
+                if not continue_cond:
 
                     mQ_qdl_ = mQ_qdl
                     mK_kdl_ = mK_kdl
@@ -1147,6 +1149,7 @@ class BlackwellFusedMultiHeadAttentionForward:
                 batch_coord = curr_block_coord[2][1]
                 continue_cond = False
                 seqlen_q = mQ_qdl.shape[0]
+                seqlen_k = mK_kdl.shape[0]
                 if cutlass.const_expr(cum_seqlen_q is not None):
                     cuseqlen_q = cum_seqlen_q[batch_coord]
                     seqlen_q = cum_seqlen_q[batch_coord + 1] - cuseqlen_q
@@ -1156,10 +1159,11 @@ class BlackwellFusedMultiHeadAttentionForward:
                         seqlen_q,
                     )
                 if not continue_cond:
-                    seqlen_k = mK_kdl.shape[0]
                     if cutlass.const_expr(cum_seqlen_k is not None):
                         cuseqlen_k = cum_seqlen_k[batch_coord]
                         seqlen_k = cum_seqlen_k[batch_coord + 1] - cuseqlen_k
+                    continue_cond = seqlen_k <= 0
+                if not continue_cond:
                     # Wait for Q0
                     q0_handle = load_q_consumer.wait_and_advance()
                     tSrQ0 = tSrQ[None, None, None, q0_handle.index]
@@ -1372,6 +1376,7 @@ class BlackwellFusedMultiHeadAttentionForward:
                 curr_block_coord = work_tile.tile_idx
                 batch_coord = curr_block_coord[2][1]
                 seqlen_k = mK_kdl.shape[0]
+                row_idx = Int32(0)
                 continue_cond = False
                 cuseqlen_q = Int32(0)
                 seqlen_q = mQ_qdl.shape[0]
@@ -1391,6 +1396,8 @@ class BlackwellFusedMultiHeadAttentionForward:
                     if cutlass.const_expr(cum_seqlen_k is not None):
                         cuseqlen_k = cum_seqlen_k[batch_coord]
                         seqlen_k = cum_seqlen_k[batch_coord + 1] - cuseqlen_k
+                    continue_cond = seqlen_k <= 0
+                if not continue_cond:
 
                     # Compute gO for STG epilogue
                     # Create mO_ with per-batch seqlen_q (ensures divisible by tile size)
@@ -2281,6 +2288,8 @@ class BlackwellFusedMultiHeadAttentionForward:
                 if cutlass.const_expr(cum_seqlen_k is not None):
                     cuseqlen_k = cum_seqlen_k[batch_coord]
                     seqlen_k_ = cum_seqlen_k[batch_coord + 1] - cuseqlen_k
+                continue_cond = seqlen_k_ <= 0
+            if not continue_cond:
                 logical_offset = (
                     curr_block_coord[0] * self.cta_tiler[0]
                     + stage * self.qk_mma_tiler[0],
@@ -3411,7 +3420,7 @@ def run(
         )
 
         _, k_tensor_workspace, _ = create_and_permute_tensor(
-            k_shape,
+            kv_shape,
             in_dtype,
             is_dynamic_layout=True,
             use_random_int=False,
