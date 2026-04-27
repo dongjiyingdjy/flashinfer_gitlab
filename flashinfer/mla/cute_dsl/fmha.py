@@ -2233,18 +2233,14 @@ class BlackwellFusedMultiHeadAttentionForward:
         )
         tmem_p_offset = self.tmem_p0_offset if stage == 0 else self.tmem_p1_offset
         tStS_P = cute.make_tensor(tStS.iterator + tmem_p_offset, tStS_P_layout)
-        if cutlass.const_expr(self.arch >= Arch.sm_100 and self.arch <= Arch.sm_100f):
-            tmem_load_atom = cute.make_copy_atom(
-                tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)),
-                self.qk_acc_dtype,
-            )
-        else:
-            tmem_load_atom = cute.make_copy_atom(
-                tcgen05.copy.LdRed32x32bOp(
-                    tcgen05.copy.Repetition(32), redOp=tcgen05.TmemLoadRedOp.MAX
-                ),
-                self.qk_acc_dtype,
-            )
+        # Keep this as a plain TMEM load on both SM100 and SM103.  The SM103
+        # reduction-load variant produces an extra reduction result, while
+        # softmax_step() expects only the score payload and must apply masks
+        # before reducing row maxima.
+        tmem_load_atom = cute.make_copy_atom(
+            tcgen05.copy.Ld32x32bOp(tcgen05.copy.Repetition(32)),
+            self.qk_acc_dtype,
+        )
 
         tiled_tmem_load = tcgen05.make_tmem_copy(tmem_load_atom, tStSi)
         thr_tmem_load = tiled_tmem_load.get_slice(thread_idx)
